@@ -1,4 +1,13 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+
+/// Shell types for completion generation
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum CompletionShell {
+    Bash,
+    Zsh,
+    Fish,
+    Powershell,
+}
 
 #[derive(Parser)]
 #[command(name = "kto")]
@@ -418,6 +427,25 @@ pub enum Commands {
   kto profile forget --learned        Clear learned patterns (keep static profile)
 "#)]
     Profile(ProfileCommands),
+
+    /// Generate shell completions
+    #[command(after_help = r#"Examples:
+  kto completions bash >> ~/.bashrc           Add bash completions
+  kto completions zsh >> ~/.zshrc             Add zsh completions
+  kto completions fish > ~/.config/fish/completions/kto.fish
+  kto completions powershell >> $PROFILE      Add PowerShell completions
+"#)]
+    Completions {
+        /// Shell to generate completions for
+        #[arg(value_enum)]
+        shell: CompletionShell,
+    },
+
+    /// Interactive first-time setup wizard
+    #[command(after_help = r#"Examples:
+  kto init                    Run the guided setup wizard
+"#)]
+    Init,
 }
 
 #[derive(Subcommand)]

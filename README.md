@@ -18,37 +18,49 @@ kto monitors web pages for changes and notifies you when something interesting h
 - **Background service** - Runs as systemd/launchd service or cron job
 - **Machine-readable output** - JSON output for scripting and automation
 
+## Installation
+
+```bash
+# Recommended: prebuilt binary (fast, no compile)
+cargo binstall kto
+
+# From crates.io (requires Rust)
+cargo install kto
+
+# Via install script
+curl -fsSL https://raw.githubusercontent.com/devindudeman/kto/main/install.sh | bash
+
+# From source
+git clone https://github.com/devindudeman/kto
+cd kto && cargo install --path . --features tui
+```
+
 ## Quick Start
 
 ```bash
-# Install
-cargo install --path .
+# First-time setup (guided wizard)
+kto init
 
-# Create your first watch
+# Or manually:
 kto new "https://news.ycombinator.com for AI news"
-
-# Set up notifications
 kto notify set --ntfy my-alerts
-
-# Install as background service
 kto service install
-
-# Check status
-kto service status
 ```
 
-## Installation
+## Shell Completions
 
-### From Source
 ```bash
-git clone https://github.com/devinbernosky/kto
-cd kto
-cargo build --release --features tui
-cp target/release/kto ~/.local/bin/
+# Bash
+kto completions bash >> ~/.bashrc
+
+# Zsh
+kto completions zsh >> ~/.zshrc
+
+# Fish
+kto completions fish > ~/.config/fish/completions/kto.fish
 ```
 
-### Dependencies
-- Rust 1.70+
+## Dependencies
 - For JS rendering: Node.js + Playwright (`kto enable-js`)
 - For AI analysis: [Claude CLI](https://claude.ai/cli) (optional)
 

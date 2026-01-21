@@ -150,5 +150,7 @@ fn run() -> Result<()> {
         Commands::Diff { watch, limit } => commands::cmd_diff(&watch, limit),
         Commands::Memory { watch, json, clear } => commands::cmd_memory(&watch, json, clear),
         Commands::Logs { lines, follow } => commands::cmd_logs(lines, follow),
+        Commands::Completions { shell } => commands::cmd_completions(shell),
+        Commands::Init => commands::cmd_init(),
     }
 }

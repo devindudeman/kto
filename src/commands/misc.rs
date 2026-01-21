@@ -1,9 +1,13 @@
-//! Miscellaneous commands: doctor, export, import, memory, diff, logs, ui
+//! Miscellaneous commands: doctor, export, import, memory, diff, logs, ui, completions, init
 
+use clap::CommandFactory;
+use clap_complete::{generate, Shell};
 use colored::Colorize;
+use std::io;
 use std::time::Duration;
 
 use kto::agent;
+use kto::cli::{Cli, CompletionShell};
 use kto::config::Config;
 use kto::db::Database;
 use kto::fetch::{self, check_playwright, PlaywrightStatus};
@@ -446,5 +450,259 @@ pub fn cmd_enable_js() -> Result<()> {
 
     println!("\n  JavaScript rendering is now enabled.");
     println!("  Create a watch with: kto new \"https://...\" --js");
+    Ok(())
+}
+
+/// Generate shell completions
+pub fn cmd_completions(shell: CompletionShell) -> Result<()> {
+    let mut cmd = Cli::command();
+    let shell = match shell {
+        CompletionShell::Bash => Shell::Bash,
+        CompletionShell::Zsh => Shell::Zsh,
+        CompletionShell::Fish => Shell::Fish,
+        CompletionShell::Powershell => Shell::PowerShell,
+    };
+    generate(shell, &mut cmd, "kto", &mut io::stdout());
+    Ok(())
+}
+
+/// Interactive first-time setup wizard
+pub fn cmd_init() -> Result<()> {
+    use inquire::{Confirm, Password, Select, Text};
+
+    println!("\n{}", "Welcome to kto!".bold());
+    println!("This wizard will help you set up kto for the first time.\n");
+
+    // Step 1: Run doctor
+    println!("{}", "Step 1: Checking dependencies...".bold());
+    println!();
+    cmd_doctor()?;
+
+    // Check if Claude CLI is available
+    let claude_available = agent::claude_version().is_some();
+    if !claude_available {
+        println!("\n{}: Claude CLI not found. AI features will be unavailable.", "Note".yellow());
+        println!("Install from: https://claude.ai/cli\n");
+    }
+
+    // Step 2: Set up notifications
+    println!("\n{}", "Step 2: Set up notifications".bold());
+
+    let config = Config::load()?;
+    let has_notification = config.default_notify.is_some();
+
+    if has_notification {
+        println!("  Notification target already configured.");
+    } else {
+        let setup_notifications = Confirm::new("Would you like to set up notifications now?")
+            .with_default(true)
+            .prompt();
+
+        match setup_notifications {
+            Ok(true) => {
+                let options = vec![
+                    "ntfy (recommended - free, simple push notifications)",
+                    "Slack (webhook)",
+                    "Discord (webhook)",
+                    "Telegram (bot)",
+                    "Gotify (self-hosted)",
+                    "Pushover",
+                    "Matrix",
+                    "Skip for now",
+                ];
+
+                let choice = Select::new("Which notification service would you like to use?", options)
+                    .prompt();
+
+                match choice {
+                    Ok(selected) => {
+                        if selected.starts_with("ntfy") {
+                            let topic = Text::new("Enter your ntfy topic (e.g., my-alerts):")
+                                .prompt();
+                            if let Ok(topic) = topic {
+                                if !topic.is_empty() {
+                                    crate::commands::cmd_notify_set(
+                                        Some(topic), None, None, None, None, None,
+                                        None, None, None, None, None, None, None,
+                                    )?;
+                                    println!("  {} ntfy notifications configured!", "✓".green());
+                                }
+                            }
+                        } else if selected.starts_with("Slack") {
+                            let webhook = Password::new("Enter your Slack webhook URL:")
+                                .without_confirmation()
+                                .prompt();
+                            if let Ok(webhook) = webhook {
+                                if !webhook.is_empty() {
+                                    crate::commands::cmd_notify_set(
+                                        None, Some(webhook), None, None, None, None,
+                                        None, None, None, None, None, None, None,
+                                    )?;
+                                    println!("  {} Slack notifications configured!", "✓".green());
+                                }
+                            }
+                        } else if selected.starts_with("Discord") {
+                            let webhook = Password::new("Enter your Discord webhook URL:")
+                                .without_confirmation()
+                                .prompt();
+                            if let Ok(webhook) = webhook {
+                                if !webhook.is_empty() {
+                                    crate::commands::cmd_notify_set(
+                                        None, None, Some(webhook), None, None, None,
+                                        None, None, None, None, None, None, None,
+                                    )?;
+                                    println!("  {} Discord notifications configured!", "✓".green());
+                                }
+                            }
+                        } else if selected.starts_with("Telegram") {
+                            let token = Password::new("Enter your Telegram bot token:")
+                                .without_confirmation()
+                                .prompt();
+                            let chat = Text::new("Enter your Telegram chat ID:")
+                                .prompt();
+                            if let (Ok(token), Ok(chat)) = (token, chat) {
+                                if !token.is_empty() && !chat.is_empty() {
+                                    crate::commands::cmd_notify_set(
+                                        None, None, None, None, None, None,
+                                        Some(token), Some(chat), None, None, None, None, None,
+                                    )?;
+                                    println!("  {} Telegram notifications configured!", "✓".green());
+                                }
+                            }
+                        } else if selected.starts_with("Gotify") {
+                            let server = Text::new("Enter your Gotify server URL:")
+                                .prompt();
+                            let token = Password::new("Enter your Gotify app token:")
+                                .without_confirmation()
+                                .prompt();
+                            if let (Ok(server), Ok(token)) = (server, token) {
+                                if !server.is_empty() && !token.is_empty() {
+                                    crate::commands::cmd_notify_set(
+                                        None, None, None, Some(server), Some(token), None,
+                                        None, None, None, None, None, None, None,
+                                    )?;
+                                    println!("  {} Gotify notifications configured!", "✓".green());
+                                }
+                            }
+                        } else if selected.starts_with("Pushover") {
+                            let user = Password::new("Enter your Pushover user key:")
+                                .without_confirmation()
+                                .prompt();
+                            let token = Password::new("Enter your Pushover API token:")
+                                .without_confirmation()
+                                .prompt();
+                            if let (Ok(user), Ok(token)) = (user, token) {
+                                if !user.is_empty() && !token.is_empty() {
+                                    crate::commands::cmd_notify_set(
+                                        None, None, None, None, None, None,
+                                        None, None, Some(user), Some(token), None, None, None,
+                                    )?;
+                                    println!("  {} Pushover notifications configured!", "✓".green());
+                                }
+                            }
+                        } else if selected.starts_with("Matrix") {
+                            let server = Text::new("Enter your Matrix homeserver URL:")
+                                .prompt();
+                            let room = Text::new("Enter your Matrix room ID:")
+                                .prompt();
+                            let token = Password::new("Enter your Matrix access token:")
+                                .without_confirmation()
+                                .prompt();
+                            if let (Ok(server), Ok(room), Ok(token)) = (server, room, token) {
+                                if !server.is_empty() && !room.is_empty() && !token.is_empty() {
+                                    crate::commands::cmd_notify_set(
+                                        None, None, None, None, None, None,
+                                        None, None, None, None, Some(server), Some(room), Some(token),
+                                    )?;
+                                    println!("  {} Matrix notifications configured!", "✓".green());
+                                }
+                            }
+                        } else {
+                            println!("  Skipping notification setup.");
+                            println!("  You can configure notifications later with: kto notify set");
+                        }
+                    }
+                    Err(_) => {
+                        println!("  Skipping notification setup.");
+                    }
+                }
+            }
+            Ok(false) | Err(_) => {
+                println!("  Skipping notification setup.");
+                println!("  You can configure notifications later with: kto notify set");
+            }
+        }
+    }
+
+    // Step 3: Create first watch
+    println!("\n{}", "Step 3: Create your first watch".bold());
+
+    let db = Database::open()?;
+    let watches = db.list_watches()?;
+
+    if !watches.is_empty() {
+        println!("  You already have {} watch(es) configured.", watches.len());
+    } else {
+        let create_watch = Confirm::new("Would you like to create your first watch now?")
+            .with_default(true)
+            .prompt();
+
+        match create_watch {
+            Ok(true) => {
+                let url = Text::new("Enter a URL to watch (or describe what you want to monitor):")
+                    .with_help_message("e.g., https://news.ycombinator.com for AI news")
+                    .prompt();
+
+                if let Ok(url) = url {
+                    if !url.is_empty() {
+                        // Call the new command
+                        crate::commands::cmd_new(
+                            Some(url),
+                            None,
+                            "15m".to_string(),
+                            false, false, false,
+                            claude_available, // Enable AI if available
+                            None, None, false,
+                            vec![], false, false,
+                        )?;
+                    }
+                }
+            }
+            Ok(false) | Err(_) => {
+                println!("  Skipping watch creation.");
+                println!("  You can create a watch later with: kto new \"https://...\"");
+            }
+        }
+    }
+
+    // Step 4: Install as service
+    println!("\n{}", "Step 4: Run in background".bold());
+
+    let install_service = Confirm::new("Would you like to install kto as a background service?")
+        .with_default(true)
+        .with_help_message("Recommended: kto will check your watches automatically")
+        .prompt();
+
+    match install_service {
+        Ok(true) => {
+            crate::commands::cmd_service_install(false, 5)?;
+        }
+        Ok(false) | Err(_) => {
+            println!("  Skipping service installation.");
+            println!("  You can install the service later with: kto service install");
+        }
+    }
+
+    // Done
+    println!("\n{}", "Setup complete!".green().bold());
+    println!();
+    println!("Useful commands:");
+    println!("  kto list              List all watches");
+    println!("  kto new \"https://...\" Create a new watch");
+    println!("  kto ui                Interactive dashboard");
+    println!("  kto service status    Check service status");
+    println!("  kto --help            Show all commands");
+    println!();
+
     Ok(())
 }

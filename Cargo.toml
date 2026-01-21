@@ -2,10 +2,31 @@
 name = "kto"
 version = "0.1.0"
 edition = "2021"
-description = "A generic, flexible web change watcher"
+description = "A generic, flexible web change watcher with AI-powered analysis"
 license = "MIT"
 readme = "README.md"
-repository = "https://github.com/devinbernosky/kto"
+repository = "https://github.com/devindudeman/kto"
+homepage = "https://github.com/devindudeman/kto"
+keywords = ["web", "monitor", "change-detection", "cli", "ai"]
+categories = ["command-line-utilities", "web-programming"]
+authors = ["devindudeman"]
+
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }.tar.gz"
+bin-dir = "{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.x86_64-unknown-linux-gnu]
+pkg-url = "{ repo }/releases/download/v{ version }/kto-x86_64-unknown-linux-gnu.tar.gz"
+
+[package.metadata.binstall.overrides.aarch64-unknown-linux-gnu]
+pkg-url = "{ repo }/releases/download/v{ version }/kto-aarch64-unknown-linux-gnu.tar.gz"
+
+[package.metadata.binstall.overrides.x86_64-apple-darwin]
+pkg-url = "{ repo }/releases/download/v{ version }/kto-x86_64-apple-darwin.tar.gz"
+
+[package.metadata.binstall.overrides.aarch64-apple-darwin]
+pkg-url = "{ repo }/releases/download/v{ version }/kto-aarch64-apple-darwin.tar.gz"
 
 [dependencies]
 # HTTP client (blocking, minimal)
@@ -30,6 +51,7 @@ zstd = "0.13"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"         # Shell completions
 inquire = "0.7"             # Interactive prompts
 ctrlc = "3"                 # Ctrl+C handler
 rand = "0.8"                # Random number generation
