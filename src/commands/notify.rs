@@ -9,6 +9,16 @@ use kto::config::{Config, NotifyTarget, QuietHours};
 use kto::notify::{send_notification, NotificationPayload};
 use kto::error::Result;
 
+/// Ensure a URL has a scheme (https:// by default)
+fn normalize_url(url: &str) -> String {
+    let url = url.trim();
+    if url.starts_with("http://") || url.starts_with("https://") {
+        url.to_string()
+    } else {
+        format!("https://{}", url)
+    }
+}
+
 /// Set up notification target
 pub fn cmd_notify_set(
     ntfy: Option<String>,
@@ -31,13 +41,16 @@ pub fn cmd_notify_set(
     let direct_target = if let Some(topic) = ntfy {
         Some(NotifyTarget::Ntfy { topic, server: None })
     } else if let Some(webhook_url) = slack {
-        Some(NotifyTarget::Slack { webhook_url })
+        Some(NotifyTarget::Slack { webhook_url: normalize_url(&webhook_url) })
     } else if let Some(webhook_url) = discord {
-        Some(NotifyTarget::Discord { webhook_url })
+        Some(NotifyTarget::Discord { webhook_url: normalize_url(&webhook_url) })
     } else if gotify_server.is_some() || gotify_token.is_some() {
         // Gotify requires both server and token
         match (gotify_server, gotify_token) {
-            (Some(server), Some(token)) => Some(NotifyTarget::Gotify { server, token }),
+            (Some(server), Some(token)) => Some(NotifyTarget::Gotify {
+                server: normalize_url(&server),
+                token
+            }),
             (Some(_), None) => {
                 return Err(kto::KtoError::ConfigError(
                     "--gotify-server requires --gotify-token".into()
@@ -86,7 +99,11 @@ pub fn cmd_notify_set(
         // Matrix requires server, room, and token
         match (matrix_server, matrix_room, matrix_token) {
             (Some(homeserver), Some(room_id), Some(access_token)) => {
-                Some(NotifyTarget::Matrix { homeserver, room_id, access_token })
+                Some(NotifyTarget::Matrix {
+                    homeserver: normalize_url(&homeserver),
+                    room_id,
+                    access_token
+                })
             }
             _ => {
                 return Err(kto::KtoError::ConfigError(
@@ -308,6 +325,7 @@ pub fn prompt_notification_setup() -> Result<Option<NotifyTarget>> {
                 .prompt()
                 .map_err(|e| kto::KtoError::ConfigError(e.to_string()))?;
 
+            let server = normalize_url(&server);
             println!("\n  Notifications will be sent to: {}", server);
 
             Ok(Some(NotifyTarget::Gotify { server, token }))
