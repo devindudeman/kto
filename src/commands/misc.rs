@@ -485,6 +485,28 @@ pub fn cmd_init() -> Result<()> {
         println!("Install from: https://claude.ai/cli\n");
     }
 
+    // Check if Playwright/JS rendering is available
+    let playwright_status = fetch::check_playwright();
+    if !playwright_status.is_ready() {
+        let setup_js = Confirm::new("JavaScript rendering is not set up. Install it now?")
+            .with_default(false)
+            .with_help_message("Required for JS-heavy sites (SPAs). Downloads ~280MB")
+            .prompt();
+
+        match setup_js {
+            Ok(true) => {
+                println!("\n  Setting up JavaScript rendering...\n");
+                if let Err(e) = cmd_enable_js() {
+                    println!("  {}: JS setup failed: {}", "Warning".yellow(), e);
+                    println!("  You can try again later with: kto enable-js\n");
+                }
+            }
+            Ok(false) | Err(_) => {
+                println!("  Skipping JS setup. Run `kto enable-js` later if needed.\n");
+            }
+        }
+    }
+
     // Step 2: Set up notifications
     println!("\n{}", "Step 2: Set up notifications".bold());
 
