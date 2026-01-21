@@ -1,0 +1,35 @@
+# Build artifacts
+/target/
+debug/
+release/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test databases
+*.db
+*.db-journal
+
+# Logs
+*.log
+
+# Environment
+.env
+.env.local
+
+# Local dev configs
+.mise.toml
+flake.nix
+flake.lock
+
+# Internal docs
+ROADMAP.md
+kto-concept.md
