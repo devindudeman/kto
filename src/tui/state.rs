@@ -70,6 +70,11 @@ pub struct App {
     pub watch_errors: std::collections::HashMap<uuid::Uuid, String>,
     // Flag to signal terminal needs full redraw (after returning from external editor)
     pub needs_full_redraw: bool,
+    // Scroll offsets for list views (auto-calculated based on selection)
+    pub watches_scroll: usize,
+    pub reminders_scroll: usize,
+    pub changes_scroll: usize,
+    pub logs_scroll: usize,
 }
 
 impl App {
@@ -114,6 +119,10 @@ impl App {
             diff_view_mode: DiffViewMode::default(),
             watch_errors: std::collections::HashMap::new(),
             needs_full_redraw: false,
+            watches_scroll: 0,
+            reminders_scroll: 0,
+            changes_scroll: 0,
+            logs_scroll: 0,
         })
     }
 
@@ -550,6 +559,50 @@ impl App {
     pub fn scroll_down(&mut self, lines: usize, max_lines: usize) {
         self.scroll_offset = (self.scroll_offset + lines).min(max_lines.saturating_sub(1));
     }
+
+    /// Update watches scroll to keep selected item visible
+    pub fn update_watches_scroll(&mut self, visible_height: usize) {
+        let selected = self.selected_watch;
+        self.watches_scroll = calculate_scroll_offset(selected, self.watches_scroll, visible_height);
+    }
+
+    /// Update reminders scroll to keep selected item visible
+    pub fn update_reminders_scroll(&mut self, visible_height: usize) {
+        let selected = self.selected_reminder;
+        self.reminders_scroll = calculate_scroll_offset(selected, self.reminders_scroll, visible_height);
+    }
+
+    /// Update changes scroll to keep selected item visible
+    pub fn update_changes_scroll(&mut self, visible_height: usize) {
+        let selected = self.selected_change;
+        self.changes_scroll = calculate_scroll_offset(selected, self.changes_scroll, visible_height);
+    }
+
+    /// Update logs scroll to keep selected item visible
+    pub fn update_logs_scroll(&mut self, visible_height: usize) {
+        let selected = self.selected_log;
+        self.logs_scroll = calculate_scroll_offset(selected, self.logs_scroll, visible_height);
+    }
+}
+
+/// Calculate scroll offset to keep selected item visible
+fn calculate_scroll_offset(selected: usize, current_scroll: usize, visible_height: usize) -> usize {
+    if visible_height == 0 {
+        return 0;
+    }
+
+    // If selected is above visible window, scroll up
+    if selected < current_scroll {
+        return selected;
+    }
+
+    // If selected is below visible window, scroll down
+    if selected >= current_scroll + visible_height {
+        return selected.saturating_sub(visible_height - 1);
+    }
+
+    // Selected is within visible window, keep current scroll
+    current_scroll
 }
 
 // === Edit State ===

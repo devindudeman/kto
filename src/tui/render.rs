@@ -103,10 +103,12 @@ pub fn ui(f: &mut Frame, app: &mut App) {
     }
 }
 
-fn render_watches(f: &mut Frame, app: &App, area: Rect) {
-    let filtered = app.filtered_watches();
+fn render_watches(f: &mut Frame, app: &mut App, area: Rect) {
+    // Check if empty first
+    let is_empty = app.filtered_watches().is_empty();
+    let filter_empty = app.filter_text.is_empty();
 
-    if filtered.is_empty() && app.filter_text.is_empty() {
+    if is_empty && filter_empty {
         let border_style = if app.focus == Pane::Watches {
             Style::default().fg(Color::Cyan)
         } else {
@@ -140,9 +142,23 @@ fn render_watches(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
+    // Calculate visible height (area minus borders)
+    let visible_height = area.height.saturating_sub(2) as usize;
+    let total_items = app.filtered_watches().len();
+
+    // Update scroll offset to keep selection visible
+    app.update_watches_scroll(visible_height);
+    let scroll_offset = app.watches_scroll;
+
+    // Now get filtered watches again for rendering (after scroll update)
+    let filtered = app.filtered_watches();
+
+    // Build items with scroll offset applied
     let items: Vec<ListItem> = filtered
         .iter()
         .enumerate()
+        .skip(scroll_offset)
+        .take(visible_height)
         .map(|(i, watch)| {
             let has_error = app.watch_errors.contains_key(&watch.id);
 
@@ -210,10 +226,19 @@ fn render_watches(f: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
-    let title = if filtered.len() > (area.height as usize - 2) {
-        format!(" Watches ({}) ↕ ", filtered.len())
+    // Build title with scroll indicator
+    let title = if total_items > visible_height {
+        let can_scroll_up = scroll_offset > 0;
+        let can_scroll_down = scroll_offset + visible_height < total_items;
+        let scroll_indicator = match (can_scroll_up, can_scroll_down) {
+            (true, true) => "↕",
+            (true, false) => "↑",
+            (false, true) => "↓",
+            (false, false) => "",
+        };
+        format!(" Watches ({}) {} ", total_items, scroll_indicator)
     } else {
-        format!(" Watches ({}) ", filtered.len())
+        format!(" Watches ({}) ", total_items)
     };
 
     let border_style = if app.focus == Pane::Watches {
@@ -231,7 +256,7 @@ fn render_watches(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(list, area);
 }
 
-fn render_reminders(f: &mut Frame, app: &App, area: Rect) {
+fn render_reminders(f: &mut Frame, app: &mut App, area: Rect) {
     if app.reminders.is_empty() {
         let border_style = if app.focus == Pane::Reminders {
             Style::default().fg(Color::Cyan)
@@ -259,10 +284,20 @@ fn render_reminders(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
+    // Calculate visible height (area minus borders)
+    let visible_height = area.height.saturating_sub(2) as usize;
+    let total_items = app.reminders.len();
+
+    // Update scroll offset to keep selection visible
+    app.update_reminders_scroll(visible_height);
+    let scroll_offset = app.reminders_scroll;
+
     let items: Vec<ListItem> = app
         .reminders
         .iter()
         .enumerate()
+        .skip(scroll_offset)
+        .take(visible_height)
         .map(|(i, reminder)| {
             let (status, status_color) = if reminder.enabled {
                 ("●", Color::Green)
@@ -312,7 +347,21 @@ fn render_reminders(f: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
-    let title = format!(" Reminders ({}) ", app.reminders.len());
+    // Build title with scroll indicator
+    let title = if total_items > visible_height {
+        let can_scroll_up = scroll_offset > 0;
+        let can_scroll_down = scroll_offset + visible_height < total_items;
+        let scroll_indicator = match (can_scroll_up, can_scroll_down) {
+            (true, true) => "↕",
+            (true, false) => "↑",
+            (false, true) => "↓",
+            (false, false) => "",
+        };
+        format!(" Reminders ({}) {} ", total_items, scroll_indicator)
+    } else {
+        format!(" Reminders ({}) ", total_items)
+    };
+
     let border_style = if app.focus == Pane::Reminders {
         Style::default().fg(Color::Cyan)
     } else {
@@ -328,7 +377,7 @@ fn render_reminders(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(list, area);
 }
 
-fn render_details(f: &mut Frame, app: &App, area: Rect) {
+fn render_details(f: &mut Frame, app: &mut App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(9), Constraint::Min(5)])
@@ -409,11 +458,22 @@ fn render_details(f: &mut Frame, app: &App, area: Rect) {
         f.render_widget(empty, chunks[0]);
     }
 
-    // Recent changes
+    // Calculate visible height for changes list (area minus borders)
+    let changes_area = chunks[1];
+    let visible_height = changes_area.height.saturating_sub(2) as usize;
+    let total_changes = app.changes.len();
+
+    // Update scroll offset to keep selection visible
+    app.update_changes_scroll(visible_height);
+    let scroll_offset = app.changes_scroll;
+
+    // Recent changes with scrolling
     let changes: Vec<ListItem> = app
         .changes
         .iter()
         .enumerate()
+        .skip(scroll_offset)
+        .take(visible_height)
         .map(|(i, change)| {
             let time = change.detected_at.format("%m/%d %H:%M").to_string();
             let status = if change.notified { "✓" } else { "○" };
@@ -448,7 +508,27 @@ fn render_details(f: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
-    let changes_title = if app.focus == Pane::Changes { " Recent Changes (Enter to view) " } else { " Recent Changes " };
+    // Build title with scroll indicator
+    let changes_title = if total_changes > visible_height {
+        let can_scroll_up = scroll_offset > 0;
+        let can_scroll_down = scroll_offset + visible_height < total_changes;
+        let scroll_indicator = match (can_scroll_up, can_scroll_down) {
+            (true, true) => "↕",
+            (true, false) => "↑",
+            (false, true) => "↓",
+            (false, false) => "",
+        };
+        if app.focus == Pane::Changes {
+            format!(" Recent Changes ({}) {} (Enter to view) ", total_changes, scroll_indicator)
+        } else {
+            format!(" Recent Changes ({}) {} ", total_changes, scroll_indicator)
+        }
+    } else if app.focus == Pane::Changes {
+        " Recent Changes (Enter to view) ".to_string()
+    } else {
+        " Recent Changes ".to_string()
+    };
+
     let border_style = if app.focus == Pane::Changes { Style::default().fg(Color::Cyan) } else { Style::default() };
 
     let changes_widget = List::new(changes)
@@ -456,7 +536,7 @@ fn render_details(f: &mut Frame, app: &App, area: Rect) {
             .borders(Borders::ALL)
             .title(changes_title)
             .border_style(border_style));
-    f.render_widget(changes_widget, chunks[1]);
+    f.render_widget(changes_widget, changes_area);
 }
 
 fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
@@ -599,9 +679,75 @@ fn render_wizard(f: &mut Frame, app: &App) {
             }
             WizardStep::Review => {
                 lines.push(Line::from(Span::styled(" Review:", Style::default().add_modifier(Modifier::BOLD))));
-                lines.push(Line::from(Span::raw(format!("  URL: {}", wizard.url))));
-                lines.push(Line::from(Span::raw(format!("  Name: {}", wizard.name))));
-                lines.push(Line::from(Span::raw(format!("  Interval: {}", format_interval(wizard.interval_secs)))));
+                lines.push(Line::from(""));
+
+                // URL (truncated if needed)
+                let max_url_len = (area.width as usize).saturating_sub(12);
+                let url_display = if wizard.url.len() > max_url_len {
+                    format!("{}...", &wizard.url[..max_url_len.saturating_sub(3)])
+                } else {
+                    wizard.url.clone()
+                };
+                lines.push(Line::from(vec![
+                    Span::styled("  URL: ", Style::default().fg(Color::DarkGray)),
+                    Span::raw(url_display),
+                ]));
+
+                lines.push(Line::from(vec![
+                    Span::styled("  Name: ", Style::default().fg(Color::DarkGray)),
+                    Span::raw(&wizard.name),
+                ]));
+
+                // Engine
+                let engine_str = match &wizard.engine {
+                    Engine::Http => "HTTP",
+                    Engine::Playwright => "Playwright (JS rendering)",
+                    Engine::Rss => "RSS/Atom feed",
+                    Engine::Shell { command } => {
+                        if command.len() > 30 { "Shell command" } else { "Shell" }
+                    }
+                };
+                lines.push(Line::from(vec![
+                    Span::styled("  Engine: ", Style::default().fg(Color::DarkGray)),
+                    Span::raw(engine_str),
+                ]));
+
+                // Extraction
+                lines.push(Line::from(vec![
+                    Span::styled("  Extraction: ", Style::default().fg(Color::DarkGray)),
+                    Span::raw(&wizard.extraction),
+                ]));
+
+                lines.push(Line::from(vec![
+                    Span::styled("  Interval: ", Style::default().fg(Color::DarkGray)),
+                    Span::raw(format_interval(wizard.interval_secs)),
+                ]));
+
+                // AI Agent status
+                let agent_display = if wizard.agent_enabled {
+                    if wizard.agent_instructions.is_empty() {
+                        "Enabled (no instructions)".to_string()
+                    } else {
+                        let preview = if wizard.agent_instructions.len() > 30 {
+                            format!("{}...", &wizard.agent_instructions[..30].replace('\n', " "))
+                        } else {
+                            wizard.agent_instructions.replace('\n', " ")
+                        };
+                        format!("Enabled: \"{}\"", preview)
+                    }
+                } else {
+                    "Disabled".to_string()
+                };
+                lines.push(Line::from(vec![
+                    Span::styled("  AI Agent: ", Style::default().fg(Color::DarkGray)),
+                    if wizard.agent_enabled {
+                        Span::styled(agent_display, Style::default().fg(Color::Cyan))
+                    } else {
+                        Span::raw(agent_display)
+                    },
+                ]));
+
+                lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(" Press Enter to create ", Style::default().fg(Color::Green))));
             }
         }
@@ -642,8 +788,37 @@ fn render_reminder_wizard(f: &mut Frame, app: &App) {
             }
             ReminderWizardStep::Review => {
                 lines.push(Line::from(Span::styled(" Review:", Style::default().add_modifier(Modifier::BOLD))));
-                lines.push(Line::from(Span::raw(format!("  Message: {}", wizard.name))));
-                lines.push(Line::from(Span::raw(format!("  When: {} {}", wizard.when_type, wizard.when_value))));
+                lines.push(Line::from(""));
+                lines.push(Line::from(vec![
+                    Span::styled("  Message: ", Style::default().fg(Color::DarkGray)),
+                    Span::raw(&wizard.name),
+                ]));
+                lines.push(Line::from(vec![
+                    Span::styled("  When: ", Style::default().fg(Color::DarkGray)),
+                    Span::raw(format!("{} {}", wizard.when_type, wizard.when_value)),
+                ]));
+
+                // Calculate and show actual trigger time
+                let trigger_time_display = calculate_reminder_time(&wizard.when_type, &wizard.when_value);
+                lines.push(Line::from(vec![
+                    Span::styled("  Triggers: ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(trigger_time_display, Style::default().fg(Color::Cyan)),
+                ]));
+
+                // Recurring status
+                if wizard.recurring {
+                    lines.push(Line::from(vec![
+                        Span::styled("  Recurring: ", Style::default().fg(Color::DarkGray)),
+                        Span::raw(format!("Every {}", wizard.interval)),
+                    ]));
+                } else {
+                    lines.push(Line::from(vec![
+                        Span::styled("  Recurring: ", Style::default().fg(Color::DarkGray)),
+                        Span::raw("No (one-time)"),
+                    ]));
+                }
+
+                lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(" Press Enter to create ", Style::default().fg(Color::Green))));
             }
         }
@@ -670,12 +845,127 @@ fn render_describe(f: &mut Frame, app: &App) {
             Span::styled(&watch.name, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
         ]));
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::raw(format!("   URL: {}", watch.url))));
-        lines.push(Line::from(Span::raw(format!("   Status: {}", if watch.enabled { "Active" } else { "Paused" }))));
-        lines.push(Line::from(Span::raw(format!("   Interval: {}", format_interval(watch.interval_secs)))));
-        lines.push(Line::from(Span::raw(format!("   Engine: {:?}", watch.engine))));
+
+        // Basic info
+        lines.push(Line::from(vec![
+            Span::styled("   URL: ", Style::default().fg(Color::DarkGray)),
+            Span::raw(&watch.url),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("   Status: ", Style::default().fg(Color::DarkGray)),
+            if watch.enabled {
+                Span::styled("Active", Style::default().fg(Color::Green))
+            } else {
+                Span::styled("Paused", Style::default().fg(Color::Yellow))
+            },
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("   Interval: ", Style::default().fg(Color::DarkGray)),
+            Span::raw(format_interval(watch.interval_secs)),
+        ]));
+
+        // Engine (formatted nicely)
+        let engine_str = match &watch.engine {
+            Engine::Http => "HTTP".to_string(),
+            Engine::Playwright => "Playwright (JS rendering)".to_string(),
+            Engine::Rss => "RSS/Atom feed".to_string(),
+            Engine::Shell { command } => format!("Shell: {}", command),
+        };
+        lines.push(Line::from(vec![
+            Span::styled("   Engine: ", Style::default().fg(Color::DarkGray)),
+            Span::raw(engine_str),
+        ]));
+
+        // Extraction (formatted nicely)
+        let extraction_str = match &watch.extraction {
+            crate::watch::Extraction::Auto => "Auto (readability)".to_string(),
+            crate::watch::Extraction::Selector { selector } => format!("CSS: {}", selector),
+            crate::watch::Extraction::Full => "Full page".to_string(),
+            crate::watch::Extraction::Meta { tags } => format!("Meta tags: {}", tags.join(", ")),
+            crate::watch::Extraction::Rss => "RSS items".to_string(),
+            crate::watch::Extraction::JsonLd { types } => {
+                match types {
+                    Some(t) if !t.is_empty() => format!("JSON-LD: {}", t.join(", ")),
+                    _ => "JSON-LD (all types)".to_string(),
+                }
+            }
+        };
+        lines.push(Line::from(vec![
+            Span::styled("   Extraction: ", Style::default().fg(Color::DarkGray)),
+            Span::raw(extraction_str),
+        ]));
+
+        // Tags
+        if !watch.tags.is_empty() {
+            lines.push(Line::from(vec![
+                Span::styled("   Tags: ", Style::default().fg(Color::DarkGray)),
+                Span::raw(watch.tags.join(", ")),
+            ]));
+        }
+
+        // Filters
+        if !watch.filters.is_empty() {
+            lines.push(Line::from(vec![
+                Span::styled("   Filters: ", Style::default().fg(Color::DarkGray)),
+                Span::raw(format!("{} filter{}", watch.filters.len(), if watch.filters.len() == 1 { "" } else { "s" })),
+            ]));
+            for filter in &watch.filters {
+                lines.push(Line::from(vec![
+                    Span::raw("     - "),
+                    Span::styled(format_filter_readable(filter), Style::default().fg(Color::DarkGray)),
+                ]));
+            }
+        }
+
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(" Press Esc to close ", Style::default().fg(Color::DarkGray))));
+
+        // ID and created date (for debugging)
+        lines.push(Line::from(Span::styled(" Metadata:", Style::default().fg(Color::Yellow))));
+        lines.push(Line::from(vec![
+            Span::styled("   ID: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(watch.id.to_string(), Style::default().fg(Color::DarkGray)),
+        ]));
+        let local_created: chrono::DateTime<chrono::Local> = watch.created_at.into();
+        lines.push(Line::from(vec![
+            Span::styled("   Created: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(local_created.format("%Y-%m-%d %H:%M").to_string(), Style::default().fg(Color::DarkGray)),
+        ]));
+
+        lines.push(Line::from(""));
+
+        // AI Agent section
+        let agent_enabled = watch.agent_config.as_ref().map(|c| c.enabled).unwrap_or(false);
+        lines.push(Line::from(vec![
+            Span::styled(" AI Agent: ", Style::default().fg(Color::DarkGray)),
+            if agent_enabled {
+                Span::styled("Enabled", Style::default().fg(Color::Green))
+            } else {
+                Span::styled("Disabled", Style::default().fg(Color::DarkGray))
+            },
+        ]));
+
+        // Show AI instructions if present
+        if let Some(ref config) = watch.agent_config {
+            if let Some(ref instructions) = config.instructions {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(" AI Instructions:", Style::default().fg(Color::Yellow))));
+                lines.push(Line::from(""));
+                // Word wrap the instructions manually for display
+                let wrap_width = area.width.saturating_sub(8) as usize; // Account for borders and padding
+                for wrapped_line in wrap_text(instructions, wrap_width) {
+                    lines.push(Line::from(Span::raw(format!("   {}", wrapped_line))));
+                }
+            }
+        }
+
+        // Profile usage
+        if watch.use_profile {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled("   Using interest profile", Style::default().fg(Color::Magenta))));
+        }
+
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(" j/k scroll  Esc close ", Style::default().fg(Color::DarkGray))));
 
         let widget = Paragraph::new(lines)
             .block(Block::default().borders(Borders::ALL).title(" Watch Details "))
@@ -685,7 +975,37 @@ fn render_describe(f: &mut Frame, app: &App) {
     }
 }
 
-fn render_logs(f: &mut Frame, app: &App) {
+/// Simple word wrapping for text display
+fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    for paragraph in text.lines() {
+        if paragraph.is_empty() {
+            lines.push(String::new());
+            continue;
+        }
+        let mut current_line = String::new();
+        for word in paragraph.split_whitespace() {
+            if current_line.is_empty() {
+                current_line = word.to_string();
+            } else if current_line.len() + 1 + word.len() <= max_width {
+                current_line.push(' ');
+                current_line.push_str(word);
+            } else {
+                lines.push(current_line);
+                current_line = word.to_string();
+            }
+        }
+        if !current_line.is_empty() {
+            lines.push(current_line);
+        }
+    }
+    if lines.is_empty() {
+        lines.push(text.to_string());
+    }
+    lines
+}
+
+fn render_logs(f: &mut Frame, app: &mut App) {
     let area = centered_rect(85, 85, f.area());
     f.render_widget(Clear, area);
 
@@ -695,7 +1015,15 @@ fn render_logs(f: &mut Frame, app: &App) {
     if app.all_changes.is_empty() {
         lines.push(Line::from(Span::styled("  No changes recorded yet", Style::default().fg(Color::DarkGray))));
     } else {
-        for (i, (change, watch_name)) in app.all_changes.iter().enumerate() {
+        // Calculate visible height (area minus borders and help line)
+        let visible_height = area.height.saturating_sub(5) as usize; // -2 borders, -1 empty, -2 help
+        let total_items = app.all_changes.len();
+
+        // Update scroll offset to keep selection visible
+        app.update_logs_scroll(visible_height);
+        let scroll_offset = app.logs_scroll;
+
+        for (i, (change, watch_name)) in app.all_changes.iter().enumerate().skip(scroll_offset).take(visible_height) {
             let is_selected = i == app.selected_log;
             let base_style = if is_selected {
                 Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD)
@@ -709,6 +1037,21 @@ fn render_logs(f: &mut Frame, app: &App) {
                 Span::styled(format!("{:<20}", watch_name), base_style.fg(Color::Cyan)),
             ]));
         }
+
+        // Show scroll position if needed
+        if total_items > visible_height {
+            let can_scroll_up = scroll_offset > 0;
+            let can_scroll_down = scroll_offset + visible_height < total_items;
+            let scroll_indicator = match (can_scroll_up, can_scroll_down) {
+                (true, true) => format!(" [{}-{} of {}] ↕", scroll_offset + 1, (scroll_offset + visible_height).min(total_items), total_items),
+                (true, false) => format!(" [{}-{} of {}] ↑", scroll_offset + 1, total_items, total_items),
+                (false, true) => format!(" [1-{} of {}] ↓", visible_height, total_items),
+                (false, false) => String::new(),
+            };
+            if !scroll_indicator.is_empty() {
+                lines.push(Line::from(Span::styled(scroll_indicator, Style::default().fg(Color::DarkGray))));
+            }
+        }
     }
 
     lines.push(Line::from(""));
@@ -721,30 +1064,117 @@ fn render_logs(f: &mut Frame, app: &App) {
 }
 
 fn render_notify_setup(f: &mut Frame, app: &App) {
-    let area = centered_rect(60, 50, f.area());
+    let area = centered_rect(65, 65, f.area());
     f.render_widget(Clear, area);
 
     if let Some(state) = &app.notify_setup_state {
+        use super::types::NotifyType;
+
         let mut lines = Vec::new();
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(" Configure Notifications", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))));
         lines.push(Line::from(""));
 
-        if state.step == 0 {
-            lines.push(Line::from(" Select type (j/k to navigate, Enter to select):"));
-            let types = ["ntfy", "Slack", "Discord", "Gotify", "Command"];
-            for (i, name) in types.iter().enumerate() {
-                let is_selected = i == 0; // Simplified
-                let marker = if is_selected { ">" } else { " " };
-                lines.push(Line::from(Span::raw(format!(" {} {}", marker, name))));
-            }
+        // Show current configuration
+        let config = crate::config::Config::load().unwrap_or_default();
+        if let Some(ref target) = config.default_notify {
+            let description = describe_notify_target(target);
+            lines.push(Line::from(vec![
+                Span::styled(" Current: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(description, Style::default().fg(Color::Green)),
+            ]));
+            lines.push(Line::from(""));
         } else {
-            lines.push(Line::from(Span::styled(" Enter value:", Style::default().fg(Color::Yellow))));
-            lines.push(Line::from(Span::raw(format!(" > {}_", state.field1))));
+            lines.push(Line::from(Span::styled(" Current: Not configured", Style::default().fg(Color::Yellow))));
+            lines.push(Line::from(""));
         }
 
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(" Enter: Confirm  Esc: Cancel ", Style::default().fg(Color::DarkGray))));
+        if state.step == 0 {
+            lines.push(Line::from(Span::styled(" Select notification service:", Style::default().fg(Color::Yellow))));
+            lines.push(Line::from(""));
+
+            let types = [
+                (NotifyType::Ntfy, "ntfy", "Free, open source push notifications"),
+                (NotifyType::Gotify, "Gotify", "Self-hosted push notification server"),
+                (NotifyType::Slack, "Slack", "Slack incoming webhook"),
+                (NotifyType::Discord, "Discord", "Discord webhook"),
+                (NotifyType::Telegram, "Telegram", "Telegram bot notifications"),
+                (NotifyType::Pushover, "Pushover", "Pushover notifications"),
+                (NotifyType::Command, "Command", "Run a shell command"),
+            ];
+
+            for (notify_type, name, desc) in types.iter() {
+                let is_selected = std::mem::discriminant(&state.notify_type) == std::mem::discriminant(notify_type);
+                if is_selected {
+                    lines.push(Line::from(vec![
+                        Span::styled(" > ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                        Span::styled(*name, Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                        Span::styled(format!(" - {}", desc), Style::default().fg(Color::DarkGray)),
+                    ]));
+                } else {
+                    lines.push(Line::from(vec![
+                        Span::raw("   "),
+                        Span::raw(*name),
+                        Span::styled(format!(" - {}", desc), Style::default().fg(Color::DarkGray)),
+                    ]));
+                }
+            }
+
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(" ↑/↓ or j/k: Navigate  Enter: Select  Esc: Cancel", Style::default().fg(Color::DarkGray))));
+        } else {
+            // Step 1: Enter value based on selected type
+            let (prompt, hint, example) = match state.notify_type {
+                NotifyType::Ntfy => (
+                    "Enter ntfy topic name:",
+                    "The topic others subscribe to",
+                    "my-alerts",
+                ),
+                NotifyType::Gotify => (
+                    "Enter Gotify server and token:",
+                    "Format: server|token",
+                    "gotify.example.com|AbCdEf123456",
+                ),
+                NotifyType::Slack => (
+                    "Enter Slack webhook URL:",
+                    "From Slack app > Incoming Webhooks",
+                    "https://hooks.slack.com/services/T.../B.../...",
+                ),
+                NotifyType::Discord => (
+                    "Enter Discord webhook URL:",
+                    "Server Settings > Integrations > Webhooks",
+                    "https://discord.com/api/webhooks/...",
+                ),
+                NotifyType::Telegram => (
+                    "Enter Telegram chat ID and bot token:",
+                    "Format: chat_id|bot_token",
+                    "123456789|123456:ABC-DEF...",
+                ),
+                NotifyType::Pushover => (
+                    "Enter Pushover user key and API token:",
+                    "Format: user_key|api_token",
+                    "uQiRzpo4DXgh...|azGDORePK8gMa...",
+                ),
+                NotifyType::Command => (
+                    "Enter command to run:",
+                    "Receives JSON payload via stdin",
+                    "notify-send \"$KTO_TITLE\"",
+                ),
+            };
+
+            lines.push(Line::from(Span::styled(format!(" {}", prompt), Style::default().fg(Color::Yellow))));
+            lines.push(Line::from(Span::styled(format!(" {}", hint), Style::default().fg(Color::DarkGray))));
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::raw(" > "),
+                Span::styled(&state.field1, Style::default().fg(Color::White)),
+                Span::styled("_", Style::default().fg(Color::White).add_modifier(Modifier::SLOW_BLINK)),
+            ]));
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(format!(" Example: {}", example), Style::default().fg(Color::DarkGray))));
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(" Enter: Save  Esc: Back", Style::default().fg(Color::DarkGray))));
+        }
 
         let widget = Paragraph::new(lines)
             .block(Block::default().borders(Borders::ALL).title(" Notification Setup "))
@@ -754,28 +1184,60 @@ fn render_notify_setup(f: &mut Frame, app: &App) {
 }
 
 fn render_filter_list(f: &mut Frame, app: &App) {
-    let area = centered_rect(60, 50, f.area());
+    let area = centered_rect(65, 50, f.area());
     f.render_widget(Clear, area);
 
     let mut lines = Vec::new();
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(" Filters", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))));
-    lines.push(Line::from(""));
 
     if let Some(watch) = app.selected_watch() {
+        lines.push(Line::from(vec![
+            Span::styled(" Filters for: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(&watch.name, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        ]));
+        lines.push(Line::from(""));
+
         if watch.filters.is_empty() {
-            lines.push(Line::from("  No filters defined"));
+            lines.push(Line::from(Span::styled("  No filters defined", Style::default().fg(Color::DarkGray))));
+            lines.push(Line::from(""));
+            lines.push(Line::from("  All changes will trigger notifications."));
+            lines.push(Line::from("  Add filters to narrow which changes notify."));
         } else {
+            lines.push(Line::from(Span::styled(
+                format!("  {} filter{} (all must pass):", watch.filters.len(), if watch.filters.len() == 1 { "" } else { "s" }),
+                Style::default().fg(Color::DarkGray)
+            )));
+            lines.push(Line::from(""));
+
             for (i, filter) in watch.filters.iter().enumerate() {
                 let is_selected = i == app.selected_filter;
-                let marker = if is_selected { ">" } else { " " };
-                lines.push(Line::from(Span::raw(format!(" {} {:?}", marker, filter))));
+                let marker_style = if is_selected {
+                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
+
+                let filter_style = if is_selected {
+                    Style::default().add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+
+                lines.push(Line::from(vec![
+                    Span::styled(format!("  {} ", if is_selected { ">" } else { " " }), marker_style),
+                    Span::styled(format!("{}. ", i + 1), Style::default().fg(Color::DarkGray)),
+                    Span::styled(format_filter_readable(filter), filter_style),
+                ]));
             }
         }
+    } else {
+        lines.push(Line::from(Span::styled(" Filters", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))));
+        lines.push(Line::from(""));
+        lines.push(Line::from("  No watch selected"));
     }
 
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(" n: new  e: edit  d: delete  Esc: back ", Style::default().fg(Color::DarkGray))));
+    lines.push(Line::from(Span::styled(" n: new  e/Enter: edit  d: delete  Esc: back ", Style::default().fg(Color::DarkGray))));
 
     let widget = Paragraph::new(lines)
         .block(Block::default().borders(Borders::ALL).title(" Filter List "))
@@ -784,19 +1246,100 @@ fn render_filter_list(f: &mut Frame, app: &App) {
 }
 
 fn render_filter_edit(f: &mut Frame, app: &App) {
-    let area = centered_rect(55, 40, f.area());
+    let area = centered_rect(60, 55, f.area());
     f.render_widget(Clear, area);
 
     if let Some(ref state) = app.filter_edit_state {
         let mut lines = Vec::new();
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(" Edit Filter", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))));
+
+        // Show if editing or adding new
+        let title = if let Some(idx) = state.filter_idx {
+            let total = app.selected_watch().map(|w| w.filters.len()).unwrap_or(0);
+            format!("Editing filter {} of {}", idx + 1, total)
+        } else {
+            "Adding new filter".to_string()
+        };
+        lines.push(Line::from(Span::styled(format!(" {}", title), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))));
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::raw(format!(" Target: {:?} (space to cycle)", state.target))));
-        lines.push(Line::from(Span::raw(format!(" Condition: {:?} (space to cycle)", state.condition))));
-        lines.push(Line::from(Span::raw(format!(" Value: {}_", state.value))));
+
+        // Field highlighting
+        let field_style = |field: FilterEditField| {
+            if state.field == field {
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            }
+        };
+
+        // Target field
+        let target_str = match state.target {
+            crate::watch::FilterTarget::New => "new content",
+            crate::watch::FilterTarget::Diff => "diff",
+            crate::watch::FilterTarget::Old => "old content",
+        };
+        lines.push(Line::from(vec![
+            Span::styled(" Target:    ", Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{} (space to cycle)", target_str), field_style(FilterEditField::Target)),
+        ]));
+
+        // Condition field
+        let condition_str = match state.condition {
+            FilterCondition::Contains => "contains",
+            FilterCondition::NotContains => "not contains",
+            FilterCondition::Matches => "matches (regex)",
+            FilterCondition::SizeGt => "size greater than",
+        };
+        lines.push(Line::from(vec![
+            Span::styled(" Condition: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{} (space to cycle)", condition_str), field_style(FilterEditField::Condition)),
+        ]));
+
+        // Value field
+        let value_hint = match state.condition {
+            FilterCondition::Contains | FilterCondition::NotContains => "text to match",
+            FilterCondition::Matches => "regex pattern",
+            FilterCondition::SizeGt => "number of chars",
+        };
+        lines.push(Line::from(vec![
+            Span::styled(" Value:     ", Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{}_", state.value), field_style(FilterEditField::Value)),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("            ", Style::default()),
+            Span::styled(format!("({})", value_hint), Style::default().fg(Color::DarkGray)),
+        ]));
+
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(" Enter: Save  Esc: Cancel ", Style::default().fg(Color::DarkGray))));
+
+        // Preview of this filter
+        lines.push(Line::from(Span::styled(" Preview:", Style::default().fg(Color::DarkGray))));
+        let preview_filter = state.to_filter();
+        lines.push(Line::from(Span::styled(
+            format!("   {}", format_filter_readable(&preview_filter)),
+            Style::default().fg(Color::Cyan)
+        )));
+
+        // Show other filters if any
+        if let Some(watch) = app.selected_watch() {
+            if !watch.filters.is_empty() {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(" Other filters:", Style::default().fg(Color::DarkGray))));
+                for (i, filter) in watch.filters.iter().enumerate() {
+                    // Skip the filter we're currently editing
+                    if Some(i) == state.filter_idx {
+                        continue;
+                    }
+                    lines.push(Line::from(Span::styled(
+                        format!("   {}. {}", i + 1, format_filter_brief(filter)),
+                        Style::default().fg(Color::DarkGray)
+                    )));
+                }
+            }
+        }
+
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(" Tab: next field  Enter: Save  Esc: Cancel ", Style::default().fg(Color::DarkGray))));
 
         let widget = Paragraph::new(lines)
             .block(Block::default().borders(Borders::ALL).title(" Filter Edit "))
@@ -806,7 +1349,7 @@ fn render_filter_edit(f: &mut Frame, app: &App) {
 }
 
 fn render_memory_inspector(f: &mut Frame, app: &App) {
-    let area = centered_rect(70, 70, f.area());
+    let area = centered_rect(75, 75, f.area());
     f.render_widget(Clear, area);
 
     if let Some(ref state) = app.memory_inspector_state {
@@ -818,44 +1361,191 @@ fn render_memory_inspector(f: &mut Frame, app: &App) {
         ]));
         lines.push(Line::from(""));
 
-        let section_label = match state.section {
-            MemorySection::Counters => "Counters",
-            MemorySection::LastValues => "Last Values",
-            MemorySection::Notes => "Notes",
-        };
-        lines.push(Line::from(Span::styled(format!(" {} (Tab to switch)", section_label), Style::default().fg(Color::Yellow))));
+        // Show section tabs
+        let sections = [
+            (MemorySection::Counters, "Counters"),
+            (MemorySection::LastValues, "Values"),
+            (MemorySection::Notes, "Notes"),
+        ];
+        let mut tab_spans = vec![Span::raw(" ")];
+        for (i, (section, label)) in sections.iter().enumerate() {
+            if i > 0 {
+                tab_spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
+            }
+            if std::mem::discriminant(section) == std::mem::discriminant(&state.section) {
+                tab_spans.push(Span::styled(
+                    format!("[{}]", label),
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                ));
+            } else {
+                tab_spans.push(Span::styled(*label, Style::default().fg(Color::DarkGray)));
+            }
+        }
+        tab_spans.push(Span::styled("  (Tab to switch)", Style::default().fg(Color::DarkGray)));
+        lines.push(Line::from(tab_spans));
         lines.push(Line::from(""));
 
         match state.section {
             MemorySection::Counters => {
-                for (i, (key, value)) in state.memory.counters.iter().enumerate() {
-                    let marker = if i == state.selected_item { ">" } else { " " };
-                    lines.push(Line::from(Span::raw(format!(" {} {}: {}", marker, key, value))));
+                if state.memory.counters.is_empty() {
+                    lines.push(Line::from(Span::styled("  No counters stored", Style::default().fg(Color::DarkGray))));
+                    lines.push(Line::from(""));
+                    lines.push(Line::from("  Counters track numeric values across checks."));
+                    lines.push(Line::from("  Example: price_checks, version_bumps"));
+                } else {
+                    lines.push(Line::from(Span::styled(
+                        format!("  {} counter{}:", state.memory.counters.len(), if state.memory.counters.len() == 1 { "" } else { "s" }),
+                        Style::default().fg(Color::DarkGray)
+                    )));
+                    lines.push(Line::from(""));
+                    for (i, (key, value)) in state.memory.counters.iter().enumerate() {
+                        let is_selected = i == state.selected_item;
+                        let marker_style = if is_selected {
+                            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(Color::DarkGray)
+                        };
+                        let key_style = if is_selected {
+                            Style::default().add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default()
+                        };
+                        lines.push(Line::from(vec![
+                            Span::styled(format!("  {} ", if is_selected { ">" } else { " " }), marker_style),
+                            Span::styled(key, key_style),
+                            Span::styled(": ", Style::default().fg(Color::DarkGray)),
+                            Span::styled(value.to_string(), Style::default().fg(Color::Cyan)),
+                        ]));
+                    }
                 }
             }
             MemorySection::LastValues => {
-                for (i, (key, value)) in state.memory.last_values.iter().enumerate() {
-                    let marker = if i == state.selected_item { ">" } else { " " };
-                    lines.push(Line::from(Span::raw(format!(" {} {}: {}", marker, key, value))));
+                if state.memory.last_values.is_empty() {
+                    lines.push(Line::from(Span::styled("  No values stored", Style::default().fg(Color::DarkGray))));
+                    lines.push(Line::from(""));
+                    lines.push(Line::from("  Values store the last seen state of something."));
+                    lines.push(Line::from("  Example: last_price, current_version"));
+                } else {
+                    lines.push(Line::from(Span::styled(
+                        format!("  {} value{}:", state.memory.last_values.len(), if state.memory.last_values.len() == 1 { "" } else { "s" }),
+                        Style::default().fg(Color::DarkGray)
+                    )));
+                    lines.push(Line::from(""));
+                    for (i, (key, value)) in state.memory.last_values.iter().enumerate() {
+                        let is_selected = i == state.selected_item;
+                        let marker_style = if is_selected {
+                            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(Color::DarkGray)
+                        };
+                        let key_style = if is_selected {
+                            Style::default().add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default()
+                        };
+                        // Format value - truncate if too long
+                        let value_str = value.to_string();
+                        let value_display = if value_str.len() > 40 {
+                            format!("{}...", &value_str[..37])
+                        } else {
+                            value_str
+                        };
+                        lines.push(Line::from(vec![
+                            Span::styled(format!("  {} ", if is_selected { ">" } else { " " }), marker_style),
+                            Span::styled(key, key_style),
+                            Span::styled(": ", Style::default().fg(Color::DarkGray)),
+                            Span::styled(value_display, Style::default().fg(Color::Cyan)),
+                        ]));
+                    }
                 }
             }
             MemorySection::Notes => {
-                for (i, note) in state.memory.notes.iter().enumerate() {
-                    let marker = if i == state.selected_item { ">" } else { " " };
-                    let preview = if note.len() > 50 { format!("{}...", &note[..47]) } else { note.clone() };
-                    lines.push(Line::from(Span::raw(format!(" {} {}", marker, preview))));
+                if state.memory.notes.is_empty() {
+                    lines.push(Line::from(Span::styled("  No notes stored", Style::default().fg(Color::DarkGray))));
+                    lines.push(Line::from(""));
+                    lines.push(Line::from("  Notes are timestamped observations from the AI."));
+                    lines.push(Line::from("  Notes older than 7 days are automatically removed."));
+                } else {
+                    lines.push(Line::from(Span::styled(
+                        format!("  {} note{} (expire after 7 days):", state.memory.notes.len(), if state.memory.notes.len() == 1 { "" } else { "s" }),
+                        Style::default().fg(Color::DarkGray)
+                    )));
+                    lines.push(Line::from(""));
+                    for (i, note) in state.memory.notes.iter().enumerate() {
+                        let is_selected = i == state.selected_item;
+                        let marker_style = if is_selected {
+                            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(Color::DarkGray)
+                        };
+
+                        // Try to extract timestamp from note
+                        let (timestamp, content) = extract_note_timestamp(note);
+                        let content_style = if is_selected {
+                            Style::default().add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default()
+                        };
+
+                        // Truncate content if needed
+                        let max_len = (area.width as usize).saturating_sub(20);
+                        let content_display = if content.len() > max_len {
+                            format!("{}...", &content[..max_len.saturating_sub(3)])
+                        } else {
+                            content.to_string()
+                        };
+
+                        if let Some(ts) = timestamp {
+                            lines.push(Line::from(vec![
+                                Span::styled(format!("  {} ", if is_selected { ">" } else { " " }), marker_style),
+                                Span::styled(format!("{} ", ts), Style::default().fg(Color::DarkGray)),
+                                Span::styled(content_display, content_style),
+                            ]));
+                        } else {
+                            lines.push(Line::from(vec![
+                                Span::styled(format!("  {} ", if is_selected { ">" } else { " " }), marker_style),
+                                Span::styled(content_display, content_style),
+                            ]));
+                        }
+                    }
                 }
             }
         }
 
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(" d: delete  C: clear all  Esc: close ", Style::default().fg(Color::DarkGray))));
+        lines.push(Line::from(Span::styled(" j/k: navigate  d: delete  C: clear all  r: refresh  Esc: close ", Style::default().fg(Color::DarkGray))));
 
         let widget = Paragraph::new(lines)
             .block(Block::default().borders(Borders::ALL).title(" Memory Inspector "))
             .style(Style::default().bg(Color::Black));
         f.render_widget(widget, area);
     }
+}
+
+/// Extract timestamp from a note if present
+fn extract_note_timestamp(note: &str) -> (Option<&str>, &str) {
+    // Notes may have format: "2026-01-15T03:43:33: content"
+    // or "CRITICAL: 2026-01-15T03:43:33: content"
+    if let Some(colon_idx) = note.find(':') {
+        let prefix = &note[..colon_idx];
+        // Check if prefix looks like a timestamp (starts with year)
+        if prefix.len() >= 10 && prefix.starts_with("202") {
+            let rest = note[colon_idx + 1..].trim_start();
+            return (Some(prefix), rest);
+        }
+        // Check for "CRITICAL: timestamp: content" pattern
+        if prefix == "CRITICAL" || prefix == "WARNING" || prefix == "INFO" {
+            let rest = &note[colon_idx + 1..].trim_start();
+            if let Some(next_colon) = rest.find(':') {
+                let timestamp = &rest[..next_colon];
+                if timestamp.len() >= 10 && timestamp.starts_with("202") {
+                    let content = rest[next_colon + 1..].trim_start();
+                    return (Some(timestamp), content);
+                }
+            }
+        }
+    }
+    (None, note)
 }
 
 fn render_profile_inspector(f: &mut Frame, app: &App) {
@@ -991,7 +1681,7 @@ fn render_edit(f: &mut Frame, app: &App) {
             ]),
             Line::from(vec![
                 Span::styled(" Extraction:   ", Style::default().fg(Color::DarkGray)),
-                Span::styled(&edit_state.extraction, field_style(EditField::Extraction)),
+                Span::styled(format_extraction_display(&edit_state.extraction), field_style(EditField::Extraction)),
             ]),
             Line::from(vec![
                 Span::styled(" Status:       ", Style::default().fg(Color::DarkGray)),
@@ -1003,7 +1693,10 @@ fn render_edit(f: &mut Frame, app: &App) {
             ]),
             Line::from(vec![
                 Span::styled(" Instructions: ", Style::default().fg(Color::DarkGray)),
-                Span::styled("(press 'e' to edit)", field_style(EditField::AgentInstructions)),
+                Span::styled(
+                    format_instructions_preview(&edit_state.agent_instructions),
+                    field_style(EditField::AgentInstructions)
+                ),
             ]),
             Line::from(vec![
                 Span::styled(" Use Profile:  ", Style::default().fg(Color::DarkGray)),
@@ -1011,7 +1704,10 @@ fn render_edit(f: &mut Frame, app: &App) {
             ]),
             Line::from(vec![
                 Span::styled(" Filters:      ", Style::default().fg(Color::DarkGray)),
-                Span::styled("(press 'f' to manage)", field_style(EditField::Filters)),
+                Span::styled(
+                    format_filters_preview(app.selected_watch()),
+                    field_style(EditField::Filters)
+                ),
             ]),
             Line::from(vec![
                 Span::styled(" Notify:       ", Style::default().fg(Color::DarkGray)),
@@ -1113,42 +1809,338 @@ fn render_reminder_edit(f: &mut Frame, app: &App) {
 }
 
 fn render_confirm(f: &mut Frame, action: ConfirmAction, app: &App) {
-    let area = centered_rect(40, 20, f.area());
+    // Adjust modal size based on action type
+    let (width, height) = match action {
+        ConfirmAction::Delete | ConfirmAction::DeleteReminder => (55, 35),
+        ConfirmAction::Test | ConfirmAction::ForceCheck => (55, 25),
+    };
+    let area = centered_rect(width, height, f.area());
     f.render_widget(Clear, area);
 
-    let message = match action {
+    let mut lines = vec![Line::from("")];
+
+    match action {
         ConfirmAction::Delete => {
-            let name = app.selected_watch().map(|w| w.name.as_str()).unwrap_or("?");
-            format!("Delete '{}'?", name)
+            if let Some(watch) = app.selected_watch() {
+                lines.push(Line::from(Span::styled(
+                    format!(" Delete '{}'?", watch.name),
+                    Style::default().add_modifier(Modifier::BOLD)
+                )));
+                lines.push(Line::from(""));
+
+                // URL (truncated if needed)
+                let max_url_len = (area.width as usize).saturating_sub(10);
+                let url_display = if watch.url.len() > max_url_len {
+                    format!("{}...", &watch.url[..max_url_len.saturating_sub(3)])
+                } else {
+                    watch.url.clone()
+                };
+                lines.push(Line::from(vec![
+                    Span::styled("   URL: ", Style::default().fg(Color::DarkGray)),
+                    Span::raw(url_display),
+                ]));
+
+                // Engine
+                let engine = match &watch.engine {
+                    Engine::Http => "HTTP",
+                    Engine::Playwright => "Playwright (JS)",
+                    Engine::Rss => "RSS/Atom",
+                    Engine::Shell { .. } => "Shell",
+                };
+                lines.push(Line::from(vec![
+                    Span::styled("   Engine: ", Style::default().fg(Color::DarkGray)),
+                    Span::raw(engine),
+                ]));
+
+                // AI Agent status
+                let agent_status = if watch.agent_config.as_ref().map(|c| c.enabled).unwrap_or(false) {
+                    "Enabled"
+                } else {
+                    "Disabled"
+                };
+                lines.push(Line::from(vec![
+                    Span::styled("   AI Agent: ", Style::default().fg(Color::DarkGray)),
+                    Span::raw(agent_status),
+                ]));
+
+                // Change count
+                let change_count = app.changes.len();
+                lines.push(Line::from(vec![
+                    Span::styled("   History: ", Style::default().fg(Color::DarkGray)),
+                    Span::raw(format!("{} changes tracked", change_count)),
+                ]));
+
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    "   This will delete all snapshots and history!",
+                    Style::default().fg(Color::Red)
+                )));
+            } else {
+                lines.push(Line::from(" Delete watch?"));
+            }
         }
         ConfirmAction::DeleteReminder => {
-            let name = app.selected_reminder().map(|r| r.name.as_str()).unwrap_or("?");
-            format!("Delete reminder '{}'?", name)
+            if let Some(reminder) = app.selected_reminder() {
+                lines.push(Line::from(Span::styled(
+                    format!(" Delete reminder '{}'?", reminder.name),
+                    Style::default().add_modifier(Modifier::BOLD)
+                )));
+                lines.push(Line::from(""));
+
+                // Scheduled time
+                let local_time: chrono::DateTime<chrono::Local> = reminder.trigger_at.into();
+                lines.push(Line::from(vec![
+                    Span::styled("   Scheduled: ", Style::default().fg(Color::DarkGray)),
+                    Span::raw(local_time.format("%Y-%m-%d %H:%M").to_string()),
+                ]));
+
+                // Recurring status
+                let recurring = if let Some(interval) = reminder.interval_secs {
+                    format!("Every {}", format_interval(interval))
+                } else {
+                    "One-time".to_string()
+                };
+                lines.push(Line::from(vec![
+                    Span::styled("   Recurring: ", Style::default().fg(Color::DarkGray)),
+                    Span::raw(recurring),
+                ]));
+            } else {
+                lines.push(Line::from(" Delete reminder?"));
+            }
         }
         ConfirmAction::Test => {
-            let name = app.selected_watch().map(|w| w.name.as_str()).unwrap_or("?");
-            format!("Test '{}'?", name)
+            if let Some(watch) = app.selected_watch() {
+                lines.push(Line::from(Span::styled(
+                    format!(" Test '{}'?", watch.name),
+                    Style::default().add_modifier(Modifier::BOLD)
+                )));
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    "   Fetches page and compares to last snapshot",
+                    Style::default().fg(Color::Cyan)
+                )));
+                lines.push(Line::from(Span::styled(
+                    "   Read-only: does NOT save or notify",
+                    Style::default().fg(Color::DarkGray)
+                )));
+            } else {
+                lines.push(Line::from(" Test watch?"));
+            }
         }
         ConfirmAction::ForceCheck => {
-            let name = app.selected_watch().map(|w| w.name.as_str()).unwrap_or("?");
-            format!("Force check '{}'?", name)
+            if let Some(watch) = app.selected_watch() {
+                lines.push(Line::from(Span::styled(
+                    format!(" Force check '{}'?", watch.name),
+                    Style::default().add_modifier(Modifier::BOLD)
+                )));
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    "   Fetches page and SAVES new snapshot",
+                    Style::default().fg(Color::Yellow)
+                )));
+                lines.push(Line::from(Span::styled(
+                    "   May trigger notification if change detected",
+                    Style::default().fg(Color::DarkGray)
+                )));
+            } else {
+                lines.push(Line::from(" Force check watch?"));
+            }
         }
-    };
+    }
 
-    let lines = vec![
-        Line::from(""),
-        Line::from(Span::raw(format!(" {} ", message))),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled(" y ", Style::default().fg(Color::Green)),
-            Span::raw("Yes  "),
-            Span::styled(" n ", Style::default().fg(Color::Red)),
-            Span::raw("No"),
-        ]),
-    ];
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled(" y ", Style::default().fg(Color::Green)),
+        Span::raw("Yes  "),
+        Span::styled(" n ", Style::default().fg(Color::Red)),
+        Span::raw("No"),
+    ]));
 
     let widget = Paragraph::new(lines)
         .block(Block::default().borders(Borders::ALL).title(" Confirm "))
         .style(Style::default().bg(Color::Black));
     f.render_widget(widget, area);
+}
+
+/// Calculate the actual trigger time for a reminder
+fn calculate_reminder_time(when_type: &str, when_value: &str) -> String {
+    use chrono::{Local, NaiveTime, Duration};
+
+    let now = Local::now();
+
+    if when_type == "at" {
+        // Parse time like "14:30"
+        if let Ok(time) = NaiveTime::parse_from_str(when_value, "%H:%M") {
+            let today = now.date_naive().and_time(time);
+            let today_local = today.and_local_timezone(Local).unwrap();
+
+            let trigger = if today_local > now {
+                today_local
+            } else {
+                // Tomorrow
+                today_local + Duration::days(1)
+            };
+
+            trigger.format("%a %b %d at %H:%M").to_string()
+        } else {
+            format!("at {}", when_value)
+        }
+    } else {
+        // Parse duration like "1h", "30m", "2d"
+        let value = when_value.trim();
+        let (num_str, unit) = if value.ends_with('h') || value.ends_with('m') || value.ends_with('d') || value.ends_with('s') {
+            let len = value.len();
+            (&value[..len - 1], &value[len - 1..])
+        } else {
+            (value, "m") // default to minutes
+        };
+
+        if let Ok(num) = num_str.parse::<i64>() {
+            let duration = match unit {
+                "s" => Duration::seconds(num),
+                "m" => Duration::minutes(num),
+                "h" => Duration::hours(num),
+                "d" => Duration::days(num),
+                _ => Duration::minutes(num),
+            };
+
+            let trigger = now + duration;
+            trigger.format("%a %b %d at %H:%M").to_string()
+        } else {
+            format!("in {}", when_value)
+        }
+    }
+}
+
+/// Format extraction string for display
+fn format_extraction_display(extraction: &str) -> String {
+    if extraction.starts_with("css:") {
+        // Show full CSS selector
+        extraction.to_string()
+    } else if extraction.starts_with("jsonld:") {
+        extraction.to_string()
+    } else if extraction.starts_with("meta:") {
+        extraction.to_string()
+    } else {
+        // auto, full, rss - just show as-is
+        extraction.to_string()
+    }
+}
+
+/// Format AI instructions preview for edit mode
+fn format_instructions_preview(instructions: &str) -> String {
+    if instructions.is_empty() {
+        "(none) (e to edit)".to_string()
+    } else {
+        // Show truncated preview + hint
+        let preview = if instructions.len() > 40 {
+            format!("\"{}...\"", &instructions[..40].replace('\n', " "))
+        } else {
+            format!("\"{}\"", instructions.replace('\n', " "))
+        };
+        format!("{} (e to edit)", preview)
+    }
+}
+
+/// Format filters preview for edit mode
+fn format_filters_preview(watch: Option<&crate::watch::Watch>) -> String {
+    let filters = watch.map(|w| &w.filters);
+    match filters {
+        None => "(no watch) (f to manage)".to_string(),
+        Some(f) if f.is_empty() => "(none) (f to manage)".to_string(),
+        Some(f) => {
+            let count = f.len();
+            let preview = f.iter()
+                .take(2)
+                .map(|filter| format_filter_brief(filter))
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            if count > 2 {
+                format!("{}: {}, ... (f to manage)", count, preview)
+            } else {
+                format!("{}: {} (f to manage)", count, preview)
+            }
+        }
+    }
+}
+
+/// Format a single filter as a brief human-readable string
+fn format_filter_brief(filter: &crate::watch::Filter) -> String {
+    let target = match filter.on {
+        crate::watch::FilterTarget::New => "new",
+        crate::watch::FilterTarget::Diff => "diff",
+        crate::watch::FilterTarget::Old => "old",
+    };
+
+    if let Some(ref v) = filter.contains {
+        let display_v = if v.len() > 15 { format!("{}...", &v[..15]) } else { v.clone() };
+        format!("contains \"{}\"", display_v)
+    } else if let Some(ref v) = filter.not_contains {
+        let display_v = if v.len() > 15 { format!("{}...", &v[..15]) } else { v.clone() };
+        format!("!contains \"{}\"", display_v)
+    } else if let Some(ref v) = filter.matches {
+        let display_v = if v.len() > 15 { format!("{}...", &v[..15]) } else { v.clone() };
+        format!("matches /{}/", display_v)
+    } else if let Some(n) = filter.size_gt {
+        format!("size > {}", n)
+    } else {
+        format!("on {}", target)
+    }
+}
+
+/// Format a filter as a full human-readable string
+fn format_filter_readable(filter: &crate::watch::Filter) -> String {
+    let target = match filter.on {
+        crate::watch::FilterTarget::New => "new content",
+        crate::watch::FilterTarget::Diff => "diff",
+        crate::watch::FilterTarget::Old => "old content",
+    };
+
+    if let Some(ref v) = filter.contains {
+        format!("contains \"{}\" (on {})", v, target)
+    } else if let Some(ref v) = filter.not_contains {
+        format!("not contains \"{}\" (on {})", v, target)
+    } else if let Some(ref v) = filter.matches {
+        format!("matches /{}/ (on {})", v, target)
+    } else if let Some(n) = filter.size_gt {
+        format!("size > {} chars (on {})", n, target)
+    } else {
+        format!("(empty filter on {})", target)
+    }
+}
+
+/// Describe a notification target for display
+fn describe_notify_target(target: &crate::config::NotifyTarget) -> String {
+    use crate::config::NotifyTarget;
+    match target {
+        NotifyTarget::Ntfy { topic, server } => {
+            let host = server.as_deref().unwrap_or("ntfy.sh");
+            format!("ntfy ({}/{})", host, topic)
+        }
+        NotifyTarget::Slack { webhook_url } => {
+            format!("Slack ({}...)", &webhook_url[..50.min(webhook_url.len())])
+        }
+        NotifyTarget::Discord { webhook_url } => {
+            format!("Discord ({}...)", &webhook_url[..50.min(webhook_url.len())])
+        }
+        NotifyTarget::Gotify { server, token: _ } => {
+            format!("Gotify ({})", server)
+        }
+        NotifyTarget::Command { command } => {
+            format!("Command: {}", command)
+        }
+        NotifyTarget::Telegram { chat_id, bot_token: _ } => {
+            format!("Telegram (chat: {})", chat_id)
+        }
+        NotifyTarget::Pushover { user_key, api_token: _ } => {
+            format!("Pushover ({}...)", &user_key[..8.min(user_key.len())])
+        }
+        NotifyTarget::Matrix { homeserver, room_id, access_token: _ } => {
+            format!("Matrix ({}: {})", homeserver, room_id)
+        }
+        NotifyTarget::Email { smtp_server, from, to, .. } => {
+            format!("Email ({} -> {} via {})", from, to, smtp_server)
+        }
+    }
 }
