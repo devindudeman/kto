@@ -1,6 +1,6 @@
 [package]
 name = "kto"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 description = "A generic, flexible web change watcher with AI-powered analysis"
 license = "MIT"
