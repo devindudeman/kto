@@ -1,0 +1,787 @@
+# kto Platform Knowledge Base
+# This file defines detection rules and monitoring strategies for known platforms.
+# User-editable at ~/.config/kto/platforms.toml
+
+# ============================================================================
+# E-COMMERCE PLATFORMS
+# ============================================================================
+
+[shopify]
+id = "shopify"
+name = "Shopify Store"
+aliases = ["shopify-store"]
+version = "2024.01"
+
+[shopify.detection]
+domains = ["myshopify.com"]
+html_signatures = ["cdn.shopify.com", "Shopify.theme", "shopify-section"]
+script_hosts = ["cdn.shopify.com"]
+meta_generator = []
+weight_threshold = 0.5
+
+[[shopify.detection.signals]]
+type = "html_contains"
+pattern = "cdn.shopify.com"
+weight = 0.5
+
+[[shopify.detection.signals]]
+type = "html_contains"
+pattern = "Shopify.theme"
+weight = 0.4
+
+[[shopify.detection.signals]]
+type = "script_src"
+pattern = "cdn.shopify.com"
+weight = 0.4
+
+[[shopify.detection.signals]]
+type = "html_contains"
+pattern = "shopify-section"
+weight = 0.2
+
+[shopify.intents.stock]
+strategies = [
+    { engine = "playwright", extraction = "auto", reason = "Button states (Add to Cart/Sold Out) are JS-rendered" },
+    { engine = "http", extraction = "json_ld", reason = "Fallback to JSON-LD Product schema for availability" },
+]
+must_have_variant = true
+variant_pattern = "?variant={id}"
+
+[shopify.intents.price]
+strategies = [
+    { engine = "http", extraction = "json_ld", reason = "JSON-LD prices are stable and structured" },
+    { engine = "playwright", extraction = "selector:.price", reason = "Fallback to DOM if no JSON-LD" },
+]
+
+[[shopify.endpoints]]
+path = "/products/{handle}.json"
+type = "json"
+provides = ["price", "availability", "variants", "title"]
+
+[[shopify.endpoints]]
+path = "/products.json"
+type = "json"
+provides = ["product_list"]
+
+[[shopify.endpoints]]
+path = "/collections/{handle}.json"
+type = "json"
+provides = ["collection_products"]
+
+[shopify.variants]
+url_param = "variant"
+selector = "[data-variant-id]"
+json_path = "$.product.variants[*].id"
+
+[[shopify.anti_patterns]]
+pattern = "password-protected"
+result = "auth_required"
+message = "Store requires password"
+
+[[shopify.anti_patterns]]
+pattern = "coming soon"
+result = "not_launched"
+message = "Store not yet launched"
+
+[shopify.evidence]
+selectors = [".product-form button", "[data-add-to-cart]", ".product__add-to-cart"]
+json_ld_types = ["Product", "Offer"]
+
+# ----------------------------------------------------------------------------
+
+[woocommerce]
+id = "woocommerce"
+name = "WooCommerce Store"
+aliases = ["woo", "wordpress-commerce"]
+version = "2024.01"
+
+[woocommerce.detection]
+domains = []
+html_signatures = ["woocommerce", "wc-product", "wc-add-to-cart"]
+script_hosts = []
+meta_generator = ["WooCommerce"]
+weight_threshold = 0.5
+
+[[woocommerce.detection.signals]]
+type = "html_contains"
+pattern = "woocommerce"
+weight = 0.5
+
+[[woocommerce.detection.signals]]
+type = "html_contains"
+pattern = "wc-product"
+weight = 0.3
+
+[[woocommerce.detection.signals]]
+type = "html_contains"
+pattern = "wc-add-to-cart"
+weight = 0.3
+
+[[woocommerce.detection.signals]]
+type = "meta_generator"
+pattern = "WooCommerce"
+weight = 0.6
+
+[woocommerce.intents.stock]
+strategies = [
+    { engine = "playwright", extraction = "auto", reason = "Stock status often requires JS" },
+    { engine = "http", extraction = "json_ld", reason = "Fallback to JSON-LD if available" },
+]
+must_have_variant = true
+
+[woocommerce.intents.price]
+strategies = [
+    { engine = "http", extraction = "json_ld", reason = "JSON-LD provides structured pricing" },
+    { engine = "http", extraction = "selector:.price", reason = "Fallback to price element" },
+]
+
+[woocommerce.variants]
+url_param = "attribute_pa_"
+selector = ".variations select"
+
+[woocommerce.evidence]
+selectors = [".single_add_to_cart_button", ".woocommerce-Price-amount"]
+json_ld_types = ["Product", "Offer"]
+
+# ----------------------------------------------------------------------------
+
+[bigcommerce]
+id = "bigcommerce"
+name = "BigCommerce Store"
+version = "2024.01"
+
+[bigcommerce.detection]
+domains = ["mybigcommerce.com"]
+html_signatures = ["bigcommerce", "bc-sf-filter", "stencil"]
+script_hosts = ["cdn.bigcommerce.com"]
+weight_threshold = 0.5
+
+[[bigcommerce.detection.signals]]
+type = "html_contains"
+pattern = "bigcommerce"
+weight = 0.5
+
+[[bigcommerce.detection.signals]]
+type = "html_contains"
+pattern = "bc-sf-filter"
+weight = 0.4
+
+[[bigcommerce.detection.signals]]
+type = "script_src"
+pattern = "cdn.bigcommerce.com"
+weight = 0.4
+
+[bigcommerce.intents.stock]
+strategies = [
+    { engine = "playwright", extraction = "auto", reason = "Stock status requires JS rendering" },
+]
+
+[bigcommerce.intents.price]
+strategies = [
+    { engine = "http", extraction = "json_ld", reason = "JSON-LD for structured pricing" },
+    { engine = "playwright", extraction = "auto", reason = "Fallback if no JSON-LD" },
+]
+
+[bigcommerce.evidence]
+selectors = [".productView-details", ".productView-price"]
+json_ld_types = ["Product"]
+
+# ----------------------------------------------------------------------------
+
+[magento]
+id = "magento"
+name = "Magento Store"
+aliases = ["adobe-commerce"]
+version = "2024.01"
+
+[magento.detection]
+domains = []
+html_signatures = ["magento", "mage-init", "Magento_"]
+script_hosts = []
+meta_generator = ["Magento"]
+weight_threshold = 0.5
+
+[[magento.detection.signals]]
+type = "html_contains"
+pattern = "mage-init"
+weight = 0.5
+
+[[magento.detection.signals]]
+type = "html_contains"
+pattern = "Magento_"
+weight = 0.4
+
+[[magento.detection.signals]]
+type = "meta_generator"
+pattern = "Magento"
+weight = 0.6
+
+[magento.intents.stock]
+strategies = [
+    { engine = "playwright", extraction = "auto", reason = "Magento stock status requires JS" },
+]
+
+[magento.intents.price]
+strategies = [
+    { engine = "http", extraction = "json_ld", reason = "JSON-LD for pricing" },
+    { engine = "playwright", extraction = "selector:.price", reason = "Fallback to price selector" },
+]
+
+[magento.evidence]
+selectors = [".product-add-form", ".price-box"]
+json_ld_types = ["Product"]
+
+# ============================================================================
+# CODE HOSTING PLATFORMS
+# ============================================================================
+
+[github]
+id = "github"
+name = "GitHub Repository"
+version = "2024.01"
+
+[github.detection]
+domains = ["github.com"]
+html_signatures = []
+script_hosts = []
+weight_threshold = 0.8
+
+[[github.detection.signals]]
+type = "domain"
+pattern = "github.com"
+weight = 0.9
+
+[github.intents.release]
+strategies = [
+    { engine = "rss", extraction = "rss", reason = "GitHub provides Atom feeds for releases" },
+]
+
+[github.intents.news]
+strategies = [
+    { engine = "rss", extraction = "rss", reason = "GitHub commits/activity via Atom feed" },
+]
+
+[[github.endpoints]]
+path = "/{owner}/{repo}/releases.atom"
+type = "atom"
+provides = ["releases"]
+
+[[github.endpoints]]
+path = "/{owner}/{repo}/commits.atom"
+type = "atom"
+provides = ["commits"]
+
+[[github.endpoints]]
+path = "/{owner}/{repo}/tags.atom"
+type = "atom"
+provides = ["tags"]
+
+# ----------------------------------------------------------------------------
+
+[gitlab]
+id = "gitlab"
+name = "GitLab Repository"
+version = "2024.01"
+
+[gitlab.detection]
+domains = ["gitlab.com"]
+html_signatures = []
+script_hosts = []
+weight_threshold = 0.8
+
+[[gitlab.detection.signals]]
+type = "domain"
+pattern = "gitlab.com"
+weight = 0.9
+
+[gitlab.intents.release]
+strategies = [
+    { engine = "rss", extraction = "rss", reason = "GitLab provides Atom feeds for releases" },
+]
+
+[[gitlab.endpoints]]
+path = "/{group}/{project}/-/releases.atom"
+type = "atom"
+provides = ["releases"]
+
+[[gitlab.endpoints]]
+path = "/{group}/{project}/-/commits/main.atom"
+type = "atom"
+provides = ["commits"]
+
+# ----------------------------------------------------------------------------
+
+[codeberg]
+id = "codeberg"
+name = "Codeberg Repository"
+version = "2024.01"
+
+[codeberg.detection]
+domains = ["codeberg.org"]
+html_signatures = []
+script_hosts = []
+weight_threshold = 0.8
+
+[[codeberg.detection.signals]]
+type = "domain"
+pattern = "codeberg.org"
+weight = 0.9
+
+[codeberg.intents.release]
+strategies = [
+    { engine = "rss", extraction = "rss", reason = "Codeberg provides RSS feeds for releases" },
+]
+
+[[codeberg.endpoints]]
+path = "/{owner}/{repo}/releases.rss"
+type = "rss"
+provides = ["releases"]
+
+# ============================================================================
+# CONTENT/BLOGGING PLATFORMS
+# ============================================================================
+
+[wordpress]
+id = "wordpress"
+name = "WordPress Site"
+version = "2024.01"
+
+[wordpress.detection]
+domains = ["wordpress.com", "wp.com"]
+html_signatures = ["wp-content", "wp-json", "wp-includes"]
+script_hosts = []
+meta_generator = ["WordPress"]
+weight_threshold = 0.4
+
+[[wordpress.detection.signals]]
+type = "html_contains"
+pattern = "wp-content"
+weight = 0.5
+
+[[wordpress.detection.signals]]
+type = "html_contains"
+pattern = "wp-json"
+weight = 0.4
+
+[[wordpress.detection.signals]]
+type = "meta_generator"
+pattern = "WordPress"
+weight = 0.6
+
+[[wordpress.detection.signals]]
+type = "html_contains"
+pattern = "wp-includes"
+weight = 0.3
+
+[wordpress.intents.news]
+strategies = [
+    { engine = "rss", extraction = "rss", reason = "WordPress has native RSS feed support" },
+    { engine = "http", extraction = "auto", reason = "Fallback to HTML if RSS not found" },
+]
+
+[wordpress.intents.release]
+strategies = [
+    { engine = "rss", extraction = "rss", reason = "WordPress RSS for updates" },
+]
+
+[[wordpress.endpoints]]
+path = "/feed"
+type = "rss"
+provides = ["posts"]
+
+[[wordpress.endpoints]]
+path = "/feed/atom"
+type = "atom"
+provides = ["posts"]
+
+[[wordpress.endpoints]]
+path = "/wp-json/wp/v2/posts"
+type = "json"
+provides = ["posts", "structured_content"]
+
+[wordpress.evidence]
+selectors = [".entry-content", ".post-content", "article"]
+
+# ============================================================================
+# NEWS & SOCIAL PLATFORMS
+# ============================================================================
+
+[hackernews]
+id = "hackernews"
+name = "Hacker News"
+aliases = ["hn", "ycombinator"]
+version = "2024.01"
+
+[hackernews.detection]
+domains = ["news.ycombinator.com"]
+html_signatures = []
+script_hosts = []
+weight_threshold = 0.8
+
+[[hackernews.detection.signals]]
+type = "domain"
+pattern = "news.ycombinator.com"
+weight = 0.9
+
+[hackernews.intents.news]
+strategies = [
+    { engine = "rss", extraction = "rss", reason = "HN has official RSS feed" },
+]
+
+[[hackernews.endpoints]]
+path = "/rss"
+type = "rss"
+provides = ["front_page"]
+
+[[hackernews.endpoints]]
+path = "/newest"
+type = "html"
+provides = ["new_stories"]
+
+# ----------------------------------------------------------------------------
+
+[reddit]
+id = "reddit"
+name = "Reddit"
+version = "2024.01"
+
+[reddit.detection]
+domains = ["reddit.com", "www.reddit.com", "old.reddit.com"]
+html_signatures = []
+script_hosts = []
+weight_threshold = 0.8
+
+[[reddit.detection.signals]]
+type = "domain"
+pattern = "reddit.com"
+weight = 0.9
+
+[reddit.intents.news]
+strategies = [
+    { engine = "rss", extraction = "rss", reason = "Reddit provides .rss suffix for any page" },
+]
+
+[[reddit.endpoints]]
+path = "/r/{subreddit}.rss"
+type = "rss"
+provides = ["subreddit_posts"]
+
+[[reddit.endpoints]]
+path = "/r/{subreddit}/new.rss"
+type = "rss"
+provides = ["new_posts"]
+
+# ============================================================================
+# PACKAGE REGISTRIES
+# ============================================================================
+
+[pypi]
+id = "pypi"
+name = "PyPI Package"
+version = "2024.01"
+
+[pypi.detection]
+domains = ["pypi.org"]
+html_signatures = []
+script_hosts = []
+weight_threshold = 0.8
+
+[[pypi.detection.signals]]
+type = "domain"
+pattern = "pypi.org"
+weight = 0.9
+
+[pypi.intents.release]
+strategies = [
+    { engine = "rss", extraction = "rss", reason = "PyPI provides RSS feeds per package" },
+]
+
+[[pypi.endpoints]]
+path = "/rss/project/{package}/releases.xml"
+type = "rss"
+provides = ["releases"]
+
+# ----------------------------------------------------------------------------
+
+[cratesio]
+id = "cratesio"
+name = "crates.io Package"
+aliases = ["crates", "rust-crate"]
+version = "2024.01"
+
+[cratesio.detection]
+domains = ["crates.io"]
+html_signatures = []
+script_hosts = []
+weight_threshold = 0.8
+
+[[cratesio.detection.signals]]
+type = "domain"
+pattern = "crates.io"
+weight = 0.9
+
+[cratesio.intents.release]
+strategies = [
+    { engine = "http", extraction = "auto", reason = "crates.io versions page (no RSS)" },
+]
+
+[[cratesio.endpoints]]
+path = "/crates/{crate}/versions"
+type = "html"
+provides = ["versions"]
+
+[[cratesio.endpoints]]
+path = "/api/v1/crates/{crate}/versions"
+type = "json"
+provides = ["versions", "download_counts"]
+
+# ----------------------------------------------------------------------------
+
+[npm]
+id = "npm"
+name = "npm Package"
+version = "2024.01"
+
+[npm.detection]
+domains = ["npmjs.com", "www.npmjs.com"]
+html_signatures = []
+script_hosts = []
+weight_threshold = 0.8
+
+[[npm.detection.signals]]
+type = "domain"
+pattern = "npmjs.com"
+weight = 0.9
+
+[npm.intents.release]
+strategies = [
+    { engine = "playwright", extraction = "auto", reason = "npm versions tab requires JS" },
+]
+
+[[npm.endpoints]]
+path = "/package/{package}?activeTab=versions"
+type = "html"
+provides = ["versions"]
+
+# ----------------------------------------------------------------------------
+
+[dockerhub]
+id = "dockerhub"
+name = "Docker Hub"
+version = "2024.01"
+
+[dockerhub.detection]
+domains = ["hub.docker.com"]
+html_signatures = []
+script_hosts = []
+weight_threshold = 0.8
+
+[[dockerhub.detection.signals]]
+type = "domain"
+pattern = "hub.docker.com"
+weight = 0.9
+
+[dockerhub.intents.release]
+strategies = [
+    { engine = "playwright", extraction = "auto", reason = "Docker Hub tags page requires JS" },
+]
+
+[[dockerhub.endpoints]]
+path = "/r/{namespace}/{image}/tags"
+type = "html"
+provides = ["tags", "digests"]
+
+[[dockerhub.endpoints]]
+path = "/_/{image}/tags"
+type = "html"
+provides = ["official_tags"]
+
+# ============================================================================
+# SPA FRAMEWORKS (Detection-only, generic strategies)
+# ============================================================================
+
+[nextjs]
+id = "nextjs"
+name = "Next.js Application"
+version = "2024.01"
+
+[nextjs.detection]
+domains = []
+html_signatures = ["__NEXT_DATA__", "_next/static"]
+script_hosts = []
+weight_threshold = 0.5
+
+[[nextjs.detection.signals]]
+type = "html_contains"
+pattern = "__NEXT_DATA__"
+weight = 0.7
+
+[[nextjs.detection.signals]]
+type = "html_contains"
+pattern = "_next/static"
+weight = 0.5
+
+[nextjs.intents.stock]
+strategies = [
+    { engine = "playwright", extraction = "auto", reason = "Next.js apps require JS rendering" },
+]
+
+[nextjs.intents.price]
+strategies = [
+    { engine = "playwright", extraction = "auto", reason = "Next.js apps require JS rendering" },
+]
+
+[nextjs.intents.news]
+strategies = [
+    { engine = "playwright", extraction = "auto", reason = "Next.js apps require JS rendering" },
+]
+
+# ----------------------------------------------------------------------------
+
+[nuxt]
+id = "nuxt"
+name = "Nuxt.js Application"
+version = "2024.01"
+
+[nuxt.detection]
+domains = []
+html_signatures = ["__NUXT__", "_nuxt/"]
+script_hosts = []
+weight_threshold = 0.5
+
+[[nuxt.detection.signals]]
+type = "html_contains"
+pattern = "__NUXT__"
+weight = 0.7
+
+[[nuxt.detection.signals]]
+type = "html_contains"
+pattern = "_nuxt/"
+weight = 0.5
+
+[nuxt.intents.stock]
+strategies = [
+    { engine = "playwright", extraction = "auto", reason = "Nuxt apps require JS rendering" },
+]
+
+[nuxt.intents.price]
+strategies = [
+    { engine = "playwright", extraction = "auto", reason = "Nuxt apps require JS rendering" },
+]
+
+# ============================================================================
+# WEBSITE BUILDERS
+# ============================================================================
+
+[wix]
+id = "wix"
+name = "Wix Site"
+version = "2024.01"
+
+[wix.detection]
+domains = ["wixsite.com"]
+html_signatures = ["wix.com", "wixstatic.com"]
+script_hosts = ["static.wixstatic.com"]
+weight_threshold = 0.5
+
+[[wix.detection.signals]]
+type = "html_contains"
+pattern = "wix.com"
+weight = 0.5
+
+[[wix.detection.signals]]
+type = "html_contains"
+pattern = "wixstatic.com"
+weight = 0.4
+
+[[wix.detection.signals]]
+type = "script_src"
+pattern = "static.wixstatic.com"
+weight = 0.4
+
+[wix.intents.stock]
+strategies = [
+    { engine = "playwright", extraction = "auto", reason = "Wix sites are heavily JS-dependent" },
+]
+
+[wix.intents.price]
+strategies = [
+    { engine = "playwright", extraction = "auto", reason = "Wix sites require JS rendering" },
+]
+
+# ----------------------------------------------------------------------------
+
+[squarespace]
+id = "squarespace"
+name = "Squarespace Site"
+version = "2024.01"
+
+[squarespace.detection]
+domains = ["squarespace.com"]
+html_signatures = ["squarespace", "sqsp.net", "static1.squarespace.com"]
+script_hosts = ["static1.squarespace.com"]
+weight_threshold = 0.5
+
+[[squarespace.detection.signals]]
+type = "html_contains"
+pattern = "squarespace"
+weight = 0.5
+
+[[squarespace.detection.signals]]
+type = "html_contains"
+pattern = "sqsp.net"
+weight = 0.4
+
+[[squarespace.detection.signals]]
+type = "script_src"
+pattern = "static1.squarespace.com"
+weight = 0.4
+
+[squarespace.intents.stock]
+strategies = [
+    { engine = "playwright", extraction = "auto", reason = "Squarespace commerce requires JS" },
+]
+
+[squarespace.intents.price]
+strategies = [
+    { engine = "http", extraction = "json_ld", reason = "Squarespace often has JSON-LD" },
+    { engine = "playwright", extraction = "auto", reason = "Fallback if no JSON-LD" },
+]
+
+# ----------------------------------------------------------------------------
+
+[webflow]
+id = "webflow"
+name = "Webflow Site"
+version = "2024.01"
+
+[webflow.detection]
+domains = ["webflow.io"]
+html_signatures = ["webflow.com", "w-richtext"]
+script_hosts = ["assets.website-files.com"]
+weight_threshold = 0.5
+
+[[webflow.detection.signals]]
+type = "html_contains"
+pattern = "webflow.com"
+weight = 0.5
+
+[[webflow.detection.signals]]
+type = "html_contains"
+pattern = "w-richtext"
+weight = 0.3
+
+[[webflow.detection.signals]]
+type = "script_src"
+pattern = "assets.website-files.com"
+weight = 0.4
+
+[webflow.intents.stock]
+strategies = [
+    { engine = "playwright", extraction = "auto", reason = "Webflow e-commerce requires JS" },
+]
+
+[webflow.intents.price]
+strategies = [
+    { engine = "playwright", extraction = "auto", reason = "Webflow prices often need JS" },
+]

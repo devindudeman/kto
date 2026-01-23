@@ -7,6 +7,8 @@ kto monitors web pages for changes and notifies you when something interesting h
 ## Features
 
 - **Simple setup** - Just give it a URL and describe what you're watching for
+- **Smart URL detection** - Auto-detects optimal endpoints for GitHub, Reddit, HN, PyPI, and more
+- **Deep research mode** - Thorough AI analysis to find the best monitoring approach
 - **AI-powered analysis** - Uses Claude to understand changes, not just detect them
 - **Multiple notification channels** - ntfy, Gotify, Slack, Discord, Telegram, Pushover, Matrix, or custom commands
 - **Shell command monitoring** - Watch output of any command, not just URLs
@@ -87,6 +89,37 @@ kto new "https://example.com" --name "Example" --tag work --tag important
 
 # From clipboard
 kto new --clipboard
+
+# Deep research for complex sites (uses more AI tokens)
+kto new "https://shop.example.com/product for price drops" --deep
+```
+
+### Smart URL Detection
+
+kto automatically detects optimal URLs for common sites:
+
+```bash
+# GitHub releases - auto-detects Atom feed
+kto new "https://github.com/astral-sh/ruff for new releases"
+# → Uses https://github.com/astral-sh/ruff/releases.atom with RSS engine
+
+# Reddit - auto-detects RSS feed
+kto new "https://reddit.com/r/rust for news"
+# → Uses https://reddit.com/r/rust.rss
+
+# Hacker News, PyPI, GitLab, Codeberg also supported
+```
+
+### Inspecting URLs
+
+```bash
+# Preview what kto extracts (before creating a watch)
+kto preview "https://example.com"
+kto preview "https://example.com" --js        # With JavaScript
+kto preview "https://example.com" --limit 5000
+
+# Real-time ephemeral monitoring (no database)
+kto watch "https://example.com" --interval 30s
 ```
 
 ### Managing Watches
@@ -267,6 +300,20 @@ kto edit "My Watch" --agent true
 # With custom instructions
 kto edit "My Watch" --agent-instructions "Alert when price drops below $50"
 ```
+
+### Deep Research Mode
+
+For complex sites where simple analysis isn't enough, use `--deep` for thorough investigation:
+
+```bash
+kto new "https://shop.example.com/product for price drops" --deep
+```
+
+Deep research mode:
+- Fetches with both HTTP and JavaScript to compare content
+- Discovers RSS/Atom feeds and JSON-LD structured data
+- Searches the web for site-specific APIs and monitoring tips
+- Recommends stable CSS selectors
 
 Requires [Claude CLI](https://claude.ai/cli):
 ```bash

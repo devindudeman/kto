@@ -7,20 +7,41 @@ use colored::Colorize;
 use inquire::{Confirm, Select, Text};
 use uuid::Uuid;
 
-use kto::agent::{self, EnhancedSetupSuggestion};
+use kto::agent::{self, DeepResearchResult, EnhancedSetupSuggestion};
 use kto::config::Config;
 use kto::db::Database;
 use kto::extract;
 use kto::fetch::{self, check_playwright, PageContent, PlaywrightStatus};
 use kto::normalize::{hash_content, normalize};
+use kto::transforms::{self, Intent, TransformMatch};
 use kto::watch::{AgentConfig, Engine, Extraction, Snapshot, Watch};
 use kto::error::Result;
 
 use crate::utils::{extract_url, format_interval, get_clipboard_content, parse_interval_str, truncate_str};
+use super::platform_detect;
 use super::prompt_notification_setup;
 
 /// Confidence threshold below which we show low-confidence UI
 const CONFIDENCE_THRESHOLD: f32 = 0.7;
+
+/// Check if kto daemon is currently running
+pub fn is_daemon_running() -> bool {
+    let home = match std::env::var("HOME") {
+        Ok(h) => h,
+        Err(_) => return false,
+    };
+    let pid_path = std::path::Path::new(&home).join(".local/share/kto/daemon.pid");
+    let pid_str = match std::fs::read_to_string(&pid_path) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let pid: u32 = match pid_str.trim().parse() {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    // Check if process exists (Linux-specific)
+    std::path::Path::new("/proc").join(pid.to_string()).exists()
+}
 
 /// Create a new watch
 pub fn cmd_new(
@@ -36,6 +57,7 @@ pub fn cmd_new(
     clipboard: bool,
     tags: Vec<String>,
     use_profile: bool,
+    research: bool,
     yes: bool,
 ) -> Result<()> {
     let db = Database::open()?;
@@ -146,15 +168,79 @@ pub fn cmd_new(
             println!("  Tags: {}", watch.tags.join(", "));
         }
         println!("  Checking every {}", format_interval(watch.interval_secs));
-        println!("\n  Run `kto daemon` to start monitoring.");
+        if !is_daemon_running() {
+            println!("\n  Run `kto daemon` to start monitoring.");
+        }
 
         return Ok(());
     }
 
     // Try to extract URL from input
-    let url = extract_url(&input).ok_or_else(|| {
-        kto::KtoError::ConfigError("Could not find a valid URL in your input".into())
+    let mut url = extract_url(&input).ok_or_else(|| {
+        kto::KtoError::ConfigError(format!(
+            "No URL found in: '{}'\n  Tip: Paste the full URL (e.g., https://example.com/page)",
+            truncate_str(&input, 50)
+        ))
     })?;
+
+    // Try URL transform detection first (for known sites like GitHub, GitLab, etc.)
+    let detected_intent = Intent::detect(&input);
+    let transform_match = if detected_intent != Intent::Generic {
+        if let Ok(parsed_url) = url::Url::parse(&url) {
+            transforms::match_transform(&parsed_url, detected_intent)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // If we have a high-confidence transform match, create watch automatically
+    // This is the "zero-prompt happy path" for known platforms
+    if let Some(ref transform) = transform_match {
+        if transform.confidence >= 0.8 {
+            // Auto-create for high confidence matches
+            return create_watch_from_transform_magical(
+                &db,
+                &url,
+                transform,
+                name_override,
+                interval,
+                tags,
+                use_profile,
+                interactive,
+                yes,
+            );
+        } else if transform.confidence >= 0.5 && interactive && !yes {
+            // Medium confidence - show preview and ask for confirmation
+            let accepted = display_transform_suggestion(
+                &url,
+                transform,
+                &name_override,
+                interval,
+                &tags,
+                use_profile,
+                yes,
+                interactive,
+            )?;
+
+            if let Some((name, final_url, final_engine, final_extraction, final_interval)) = accepted {
+                return create_watch_from_transform(
+                    &db,
+                    name,
+                    final_url,
+                    final_engine,
+                    final_extraction,
+                    final_interval,
+                    tags,
+                    use_profile,
+                    interactive,
+                    yes,
+                );
+            }
+            // User declined - fall through to normal flow
+        }
+    }
 
     // Detect if user expressed intent (what to watch for)
     let has_intent = input.contains(" for ") || input.contains(" when ") || input.contains(" if ")
@@ -169,12 +255,46 @@ pub fn cmd_new(
     // Works in both interactive and --yes mode (auto-accepts in --yes mode)
     let use_enhanced_wizard = has_intent && claude_available && !use_agent && !use_rss && !use_shell;
 
+    // Check if we should use deep research mode
+    let should_research = research;
+
+    // Deep research flow - more thorough analysis with web search
+    if should_research && claude_available {
+        return run_deep_research_flow(
+            &input,
+            &url,
+            name_override,
+            interval,
+            tags,
+            use_profile,
+            yes,
+            interactive,
+        );
+    }
+
     // Enhanced wizard flow with dual fetch and smart analysis
     let (engine, content, extracted, title, enhanced_suggestion) = if use_enhanced_wizard {
         println!("\n  Analyzing {}...", url);
 
         // Perform dual fetch: HTTP and Playwright in parallel
         let (http_content, js_content) = dual_fetch(&url)?;
+
+        // Run platform detection with KB
+        let platform_analysis = platform_detect::analyze_url_with_platform_kb(
+            &url,
+            detected_intent,
+            http_content.as_ref(),
+            js_content.as_ref(),
+        ).ok();
+
+        // Show platform detection results (if detected)
+        if let Some(ref analysis) = platform_analysis {
+            if analysis.has_platform() {
+                if let Some(ref pm) = analysis.platform_match {
+                    println!("  Platform: {} ({:.0}% confidence)", pm.platform_name.cyan(), pm.score * 100.0);
+                }
+            }
+        }
 
         // Extract content from both fetches
         let http_extracted = http_content.as_ref()
@@ -189,20 +309,52 @@ pub fn cmd_new(
             .unwrap_or_else(|| "Untitled".to_string());
 
         // Call enhanced AI analysis with both content versions
+        // Include KB context if platform was detected
         println!("  Analyzing with AI (dual fetch)...");
         let suggestion = match agent::analyze_for_setup_v2(
             &input,
             http_extracted.as_deref(),
             js_extracted.as_deref(),
         ) {
-            Ok(s) => s,
+            Ok(mut s) => {
+                // Apply KB recommendations if AI confidence is lower than KB
+                if let Some(ref analysis) = platform_analysis {
+                    if let Some(ref best) = analysis.best_strategy {
+                        // If platform detection suggests JS and AI didn't, prefer KB
+                        if matches!(best.engine, Engine::Playwright) && !s.needs_js {
+                            if analysis.confidence > s.confidence {
+                                s.needs_js = true;
+                                s.js_reason = Some(format!(
+                                    "KB recommends for {}: {}",
+                                    analysis.platform_match.as_ref().map(|p| p.platform_name.as_str()).unwrap_or("platform"),
+                                    best.reason
+                                ));
+                            }
+                        }
+                    }
+                }
+                s
+            }
             Err(e) => {
                 eprintln!("  AI analysis failed: {} (using fallback)", e);
-                EnhancedSetupSuggestion::fallback(&url, &input)
+                // Use KB recommendations as fallback
+                if let Some(ref analysis) = platform_analysis {
+                    if let Some(ref best) = analysis.best_strategy {
+                        let mut fallback = EnhancedSetupSuggestion::fallback(&url, &input);
+                        fallback.needs_js = matches!(best.engine, Engine::Playwright);
+                        fallback.js_reason = Some(format!("KB: {}", best.reason));
+                        fallback.confidence = analysis.confidence;
+                        fallback
+                    } else {
+                        EnhancedSetupSuggestion::fallback(&url, &input)
+                    }
+                } else {
+                    EnhancedSetupSuggestion::fallback(&url, &input)
+                }
             }
         };
 
-        // Determine which content/engine to use based on AI recommendation
+        // Determine which content/engine to use based on AI recommendation (augmented by KB)
         let (final_engine, final_content) = if suggestion.needs_js && js_content.is_some() {
             (Engine::Playwright, js_content.unwrap())
         } else if http_content.is_some() {
@@ -263,9 +415,9 @@ pub fn cmd_new(
                             .prompt()
                             .unwrap_or(false);
                         if use_rss {
-                            // Note: we'd need to change the URL too - for now just suggest
-                            println!("  Tip: Run `kto new \"{}\" --rss` to watch the feed directly.", rss_link);
-                            probe.suggested_engine
+                            println!("  Switching to RSS feed.");
+                            url = rss_link.clone();
+                            Engine::Rss
                         } else {
                             probe.suggested_engine
                         }
@@ -318,8 +470,14 @@ pub fn cmd_new(
         };
         println!("  Fetching {}{}...", url, engine_label);
 
-        // Fetch the page
-        let content = fetch::fetch(&url, engine.clone(), &std::collections::HashMap::new())?;
+        // Fetch the page with friendly error handling
+        let content = match fetch::fetch(&url, engine.clone(), &std::collections::HashMap::new()) {
+            Ok(c) => c,
+            Err(e) => {
+                let msg = platform_detect::friendly_error_message(&e.to_string(), &url);
+                return Err(kto::KtoError::ConfigError(msg));
+            }
+        };
 
         // Determine extraction strategy
         let extraction = match (&selector, &engine) {
@@ -329,17 +487,37 @@ pub fn cmd_new(
         };
 
         // Extract content
-        let extracted = extract::extract(&content, &extraction)?;
+        let mut extracted = extract::extract(&content, &extraction)?;
         let title = extract::extract_title(&content.html)
             .unwrap_or_else(|| "Untitled".to_string());
 
-        // Check if extraction got reasonable content, suggest JS if not
-        if extracted.len() < 50 && !use_js {
-            println!("\n  Warning: Very little content extracted ({} chars).", extracted.len());
-            println!("  This page may require JavaScript rendering. Try: kto new <URL> --js");
-        }
+        // Smart fallback: if HTTP content is thin, auto-retry with Playwright
+        let (final_engine, final_content) = if extracted.len() < 200 && !use_js && engine == Engine::Http {
+            // Check if Playwright is available
+            if check_playwright().is_ready() {
+                println!("  Site needs visual rendering. Switching to browser mode...");
+                match fetch::fetch(&url, Engine::Playwright, &std::collections::HashMap::new()) {
+                    Ok(js_content) => {
+                        let js_extracted = extract::extract(&js_content, &extraction)
+                            .unwrap_or_else(|_| extracted.clone());
+                        if js_extracted.len() > extracted.len() {
+                            extracted = js_extracted;
+                            (Engine::Playwright, js_content)
+                        } else {
+                            (engine, content)
+                        }
+                    }
+                    Err(_) => (engine, content),
+                }
+            } else {
+                println!("\n  Note: Page may need JavaScript. Run `kto init` to enable browser mode.");
+                (engine, content)
+            }
+        } else {
+            (engine, content)
+        };
 
-        (engine, content, extracted, title, None)
+        (final_engine, final_content, extracted, title, None)
     };
 
     // Determine extraction strategy based on selector or engine
@@ -387,36 +565,55 @@ pub fn cmd_new(
                 // Explicit --agent flag always enables, use provided instructions
                 (true, agent_instructions.clone())
             } else if interactive {
-                // Interactive mode: ask about intent first
+                // Interactive mode: use selection for common intents
                 println!();
-                let intent = Text::new("What changes matter to you?")
-                    .with_help_message("e.g., 'price drops', 'new articles', 'back in stock' (Enter to skip)")
+                let intent_options = vec![
+                    "Price changes (sales, drops, increases)",
+                    "Back in stock / availability",
+                    "New content or updates",
+                    "Any changes (notify on all)",
+                    "Custom (I'll describe it)",
+                ];
+
+                let choice = Select::new("What do you want to watch for?", intent_options)
                     .prompt()
                     .map_err(|e| kto::KtoError::ConfigError(e.to_string()))?;
 
-                if !intent.trim().is_empty() {
-                    // User provided intent
-                    if claude_available {
-                        // Preview the intent and confirm
-                        println!();
-                        println!("  Intent captured: \"{}\"", intent.trim());
-
-                        // Warn about potential shell escaping issues
-                        if !intent.contains('$') && intent.chars().any(|c| c.is_ascii_digit()) {
-                            println!("  Note: If you meant a price like $100, make sure the '$' is included.");
-                        }
-
-                        println!("  AI will filter changes based on this intent.");
-                        (true, Some(intent.trim().to_string()))
-                    } else {
-                        // No Claude CLI - warn user
-                        println!("  Warning: Claude CLI not found. Notifications will be basic.");
-                        println!("  Install: curl -fsSL https://claude.ai/install.sh | bash");
+                let (agent_needed, instructions) = match choice {
+                    "Price changes (sales, drops, increases)" => {
+                        (true, Some("Alert when price changes. Include old and new price.".to_string()))
+                    }
+                    "Back in stock / availability" => {
+                        (true, Some("Alert when item becomes available or goes out of stock.".to_string()))
+                    }
+                    "New content or updates" => {
+                        (true, Some("Alert when new content is added. Summarize what's new.".to_string()))
+                    }
+                    "Any changes (notify on all)" => {
                         (false, None)
                     }
-                } else {
-                    // User skipped intent - don't enable AI
+                    "Custom (I'll describe it)" => {
+                        let custom_intent = Text::new("Describe what changes matter:")
+                            .with_help_message("e.g., 'price drops below $50', 'new job postings'")
+                            .prompt()
+                            .map_err(|e| kto::KtoError::ConfigError(e.to_string()))?;
+
+                        if custom_intent.trim().is_empty() {
+                            (false, None)
+                        } else {
+                            (true, Some(custom_intent.trim().to_string()))
+                        }
+                    }
+                    _ => (false, None),
+                };
+
+                if agent_needed && !claude_available {
+                    println!("  Note: Smart filtering requires Claude CLI.");
+                    println!("  Install: curl -fsSL https://claude.ai/install.sh | bash");
+                    println!("  Will notify on all changes for now.");
                     (false, None)
+                } else {
+                    (agent_needed, instructions)
                 }
             } else {
                 // Non-interactive mode: require explicit --agent flag
@@ -477,19 +674,27 @@ pub fn cmd_new(
     };
     db.insert_snapshot(&snapshot)?;
 
-    println!("\n  Created watch \"{}\"", name);
-    println!("  Initial hash: {}", &hash[..8]);
-    println!("  Engine: {:?}", watch.engine);
-    if watch.agent_config.is_some() {
-        println!("  AI Agent: enabled");
-    }
-    if watch.use_profile {
-        println!("  Profile: enabled");
-    }
+    // User-friendly success output (no jargon)
+    let has_agent = watch.agent_config.is_some();
+    let agent_instructions = watch.agent_config.as_ref().and_then(|c| c.instructions.as_deref());
+    let intent_description = platform_detect::describe_watch_intent(
+        &watch.engine,
+        has_agent,
+        agent_instructions,
+    );
+
+    let success_msg = platform_detect::format_watch_created(
+        &name,
+        &intent_description,
+        watch.interval_secs,
+        has_agent,
+    );
+    println!("{}", success_msg);
+
+    // Show tags if present
     if !watch.tags.is_empty() {
-        println!("  Tags: {}", watch.tags.join(", "));
+        println!("   Tags: {}", watch.tags.join(", "));
     }
-    println!("  Checking every {}", format_interval(watch.interval_secs));
 
     // Prompt for notification setup if not configured and interactive (skip with --yes)
     let mut config = Config::load()?;
@@ -502,7 +707,9 @@ pub fn cmd_new(
         }
     }
 
-    println!("\n  Run `kto daemon` to start monitoring.");
+    if !is_daemon_running() {
+        println!("\n  Run `kto daemon` to start monitoring.");
+    }
 
     Ok(())
 }
@@ -1035,6 +1242,12 @@ fn display_enhanced_confirmation(
             for reason in &suggestion.uncertainty_reasons {
                 println!("    • {}", reason);
             }
+            // Suggest deep research mode
+            let claude_available = agent::claude_version().is_some();
+            if claude_available {
+                println!();
+                println!("  Tip: Use --research for thorough page analysis");
+            }
         }
         println!();
     }
@@ -1268,6 +1481,877 @@ fn construct_variant_url(base_url: &str, url_hint: &str) -> String {
             format!("{}&{}", base_url, url_hint)
         } else {
             format!("{}?{}", base_url, url_hint)
+        }
+    }
+}
+
+// ============================================================================
+// URL Transform Helper Functions
+// ============================================================================
+
+/// Display a transform suggestion and let user accept/decline
+/// Returns Some((name, url, engine, extraction, interval)) if accepted, None if declined
+fn display_transform_suggestion(
+    original_url: &str,
+    transform: &TransformMatch,
+    name_override: &Option<String>,
+    default_interval: u64,
+    _tags: &[String],
+    _use_profile: bool,
+    yes: bool,
+    interactive: bool,
+) -> Result<Option<(String, String, Engine, Extraction, u64)>> {
+    let transformed_url = transform.url.as_str();
+
+    // Generate a default name from the URL
+    let default_name = generate_name_from_url(&transform.url);
+
+    if yes {
+        // Auto-accept with --yes flag
+        let name = name_override.clone().unwrap_or(default_name);
+        let extraction = if transform.engine == Engine::Rss {
+            Extraction::Rss
+        } else {
+            Extraction::Auto
+        };
+
+        // Show user-friendly output (no jargon)
+        println!("\n  Found: {}", transform.description);
+
+        return Ok(Some((
+            name,
+            transformed_url.to_string(),
+            transform.engine.clone(),
+            extraction,
+            default_interval,
+        )));
+    }
+
+    if !interactive {
+        // Non-interactive without --yes, just show info
+        return Ok(None);
+    }
+
+    // Interactive mode - show user-friendly suggestion
+    println!();
+    let platform_name = detect_platform_name(transform.url.host_str());
+    println!("  ✨ {} detected", platform_name.cyan());
+    println!();
+    println!("  Found: {}", transform.description.green());
+    println!();
+
+    // User-friendly description instead of technical jargon
+    if transform.engine == Engine::Rss {
+        println!("  Will notify you when new items are published.");
+    } else {
+        println!("  Will monitor the page for changes.");
+    }
+    println!();
+
+    let choices = vec!["Accept (recommended)", "Use original URL instead", "Cancel"];
+    let choice = Select::new("How would you like to proceed?", choices)
+        .prompt()
+        .map_err(|e| kto::KtoError::ConfigError(e.to_string()))?;
+
+    match choice {
+        "Accept (recommended)" => {
+            let name = match name_override {
+                Some(n) => n.clone(),
+                None => {
+                    Text::new("Name for this watch?")
+                        .with_default(&default_name)
+                        .prompt()
+                        .map_err(|e| kto::KtoError::ConfigError(e.to_string()))?
+                }
+            };
+
+            let extraction = if transform.engine == Engine::Rss {
+                Extraction::Rss
+            } else {
+                Extraction::Auto
+            };
+
+            Ok(Some((
+                name,
+                transformed_url.to_string(),
+                transform.engine.clone(),
+                extraction,
+                default_interval,
+            )))
+        }
+        "Use original URL instead" => {
+            // User declined - return None to fall through to normal flow
+            println!("  Using original URL: {}", original_url);
+            Ok(None)
+        }
+        "Cancel" | _ => {
+            Err(kto::KtoError::ConfigError("Watch creation cancelled".into()))
+        }
+    }
+}
+
+/// Create a watch directly from transform match (bypassing AI analysis)
+fn create_watch_from_transform(
+    db: &Database,
+    name: String,
+    url: String,
+    engine: Engine,
+    extraction: Extraction,
+    interval: u64,
+    tags: Vec<String>,
+    use_profile: bool,
+    interactive: bool,
+    yes: bool,
+) -> Result<()> {
+    println!("\n  Fetching {}...", url);
+
+    // Fetch the page to create initial snapshot
+    let content = fetch::fetch(&url, engine.clone(), &std::collections::HashMap::new())?;
+
+    // Extract content
+    let extracted = extract::extract(&content, &extraction)?;
+
+    // Create watch
+    let mut watch = Watch::new(name.clone(), url);
+    watch.interval_secs = interval.max(10);
+    watch.engine = engine;
+    watch.extraction = extraction;
+    watch.tags = tags;
+    watch.use_profile = use_profile;
+
+    // No agent config for transform-based watches by default
+    // (RSS feeds don't need AI analysis in most cases)
+
+    db.insert_watch(&watch)?;
+
+    // Create initial snapshot
+    let normalized = normalize(&extracted, &watch.normalization);
+    let hash = hash_content(&normalized);
+
+    let snapshot = Snapshot {
+        id: Uuid::new_v4(),
+        watch_id: watch.id,
+        fetched_at: Utc::now(),
+        raw_html: Some(zstd::encode_all(content.html.as_bytes(), 3)?),
+        extracted: normalized,
+        content_hash: hash.clone(),
+    };
+    db.insert_snapshot(&snapshot)?;
+
+    // User-friendly success output
+    let intent_description = platform_detect::describe_watch_intent(&watch.engine, false, None);
+    let success_msg = platform_detect::format_watch_created(
+        &name,
+        &intent_description,
+        watch.interval_secs,
+        false,
+    );
+    println!("{}", success_msg);
+
+    if !watch.tags.is_empty() {
+        println!("   Tags: {}", watch.tags.join(", "));
+    }
+
+    // Prompt for notification setup if not configured and interactive
+    let mut config = Config::load()?;
+    if config.default_notify.is_none() && interactive && !yes {
+        println!();
+        if let Some(target) = super::prompt_notification_setup()? {
+            config.default_notify = Some(target);
+            config.save()?;
+            println!("  Notification settings saved.");
+        }
+    }
+
+    if !is_daemon_running() {
+        println!("\n  Run `kto daemon` to start monitoring.");
+    }
+
+    Ok(())
+}
+
+/// Create a watch from a high-confidence transform match - zero prompts!
+/// This is the "magical" happy path for known platforms like GitHub, Reddit, etc.
+fn create_watch_from_transform_magical(
+    db: &Database,
+    original_url: &str,
+    transform: &TransformMatch,
+    name_override: Option<String>,
+    default_interval: u64,
+    tags: Vec<String>,
+    use_profile: bool,
+    interactive: bool,
+    yes: bool,
+) -> Result<()> {
+    let transformed_url = transform.url.as_str();
+    let engine = transform.engine.clone();
+
+    // Step 1: Show we're analyzing
+    println!("\n  Analyzing {}...", original_url.split('/').take(3).collect::<Vec<_>>().join("/"));
+
+    // Step 2: Fetch to get content and validate
+    let content = match fetch::fetch(transformed_url, engine.clone(), &std::collections::HashMap::new()) {
+        Ok(c) => c,
+        Err(e) => {
+            // User-friendly error
+            let msg = platform_detect::friendly_error_message(&e.to_string(), original_url);
+            return Err(kto::KtoError::ConfigError(msg));
+        }
+    };
+
+    // Step 3: Extract content
+    let extraction = if engine == Engine::Rss {
+        Extraction::Rss
+    } else {
+        Extraction::Auto
+    };
+    let extracted = extract::extract(&content, &extraction)?;
+
+    // Step 4: Get name (from page title, URL, or override)
+    let default_name = generate_name_from_url(&transform.url);
+    let name = name_override.unwrap_or(default_name);
+
+    // Step 5: Get a preview of what we're watching
+    let latest_item = if engine == Engine::Rss {
+        // For RSS, get the first item title
+        extract_first_rss_item(&extracted)
+    } else {
+        None
+    };
+
+    // Step 6: Show the user-friendly preview
+    println!();
+    let preview = platform_detect::format_known_platform_preview(
+        original_url,
+        &detect_platform_name(transform.url.host_str()),
+        transform.description,
+        latest_item.as_deref(),
+    );
+    println!("{}", preview);
+
+    // Step 7: Create watch
+    let mut watch = Watch::new(name.clone(), transformed_url.to_string());
+    watch.interval_secs = default_interval.max(10);
+    watch.engine = engine.clone();
+    watch.extraction = extraction;
+    watch.tags = tags;
+    watch.use_profile = use_profile;
+
+    db.insert_watch(&watch)?;
+
+    // Step 8: Create initial snapshot
+    let normalized = normalize(&extracted, &watch.normalization);
+    let hash = hash_content(&normalized);
+
+    let snapshot = Snapshot {
+        id: Uuid::new_v4(),
+        watch_id: watch.id,
+        fetched_at: Utc::now(),
+        raw_html: Some(zstd::encode_all(content.html.as_bytes(), 3)?),
+        extracted: normalized,
+        content_hash: hash,
+    };
+    db.insert_snapshot(&snapshot)?;
+
+    // Step 9: Show success message (no jargon!)
+    let intent_description = platform_detect::describe_watch_intent(&watch.engine, false, None);
+    let success_msg = platform_detect::format_watch_created(
+        &name,
+        &intent_description,
+        watch.interval_secs,
+        false,
+    );
+    println!("{}", success_msg);
+
+    // Step 10: Prompt for notification setup if needed
+    let mut config = Config::load()?;
+    if config.default_notify.is_none() && interactive && !yes {
+        println!();
+        if let Some(target) = super::prompt_notification_setup()? {
+            config.default_notify = Some(target);
+            config.save()?;
+            println!("  Notification settings saved.");
+        }
+    }
+
+    if !is_daemon_running() {
+        println!("\n  Run `kto daemon` to start monitoring.");
+    }
+
+    Ok(())
+}
+
+/// Extract the first item title from RSS feed content
+fn extract_first_rss_item(rss_content: &str) -> Option<String> {
+    // RSS content is already formatted by fetch, look for first item
+    for line in rss_content.lines() {
+        let trimmed = line.trim();
+        if !trimmed.is_empty() && !trimmed.starts_with('-') && !trimmed.starts_with('[') {
+            // Skip header lines, return first actual content
+            if trimmed.len() > 5 && trimmed.len() < 100 {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Get a human-readable platform name from host
+fn detect_platform_name(host: Option<&str>) -> String {
+    match host {
+        Some("github.com") => "GitHub Repository".to_string(),
+        Some("gitlab.com") => "GitLab Project".to_string(),
+        Some("codeberg.org") => "Codeberg Repository".to_string(),
+        Some("news.ycombinator.com") => "Hacker News".to_string(),
+        Some(h) if h.contains("reddit.com") => "Reddit".to_string(),
+        Some("pypi.org") => "PyPI Package".to_string(),
+        Some("crates.io") => "Crates.io Package".to_string(),
+        Some("hub.docker.com") => "Docker Hub".to_string(),
+        Some("www.npmjs.com") => "npm Package".to_string(),
+        Some(h) => h.to_string(),
+        None => "Site".to_string(),
+    }
+}
+
+/// Generate a human-readable name from a URL
+fn generate_name_from_url(url: &url::Url) -> String {
+    // Try to extract meaningful name from path
+    let path = url.path().trim_matches('/');
+    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+
+    // For GitHub/GitLab repos: "owner/repo" -> "owner/repo releases"
+    if let Some(host) = url.host_str() {
+        if (host == "github.com" || host == "gitlab.com" || host == "codeberg.org")
+            && segments.len() >= 2
+        {
+            let owner = segments[0];
+            let repo = segments[1];
+            return format!("{}/{}", owner, repo);
+        }
+
+        // For Reddit: "r/subreddit" -> "r/subreddit"
+        if host.contains("reddit.com") && segments.len() >= 2 && segments[0] == "r" {
+            return format!("r/{}", segments[1]);
+        }
+
+        // For HN
+        if host == "news.ycombinator.com" {
+            return "Hacker News".to_string();
+        }
+
+        // For PyPI
+        if host == "pypi.org" && segments.len() >= 2 && segments[0] == "project" {
+            return format!("PyPI: {}", segments[1]);
+        }
+    }
+
+    // Fallback: use host
+    url.host_str()
+        .unwrap_or("Watch")
+        .to_string()
+}
+
+// ============================================================================
+// Deep Research Mode
+// ============================================================================
+
+/// Run the deep research flow for watch creation
+fn run_deep_research_flow(
+    input: &str,
+    url: &str,
+    name_override: Option<String>,
+    default_interval: u64,
+    tags: Vec<String>,
+    use_profile: bool,
+    yes: bool,
+    interactive: bool,
+) -> Result<()> {
+    let db = Database::open()?;
+
+    println!("\n  {} Deep Research Mode", "🔬".bold());
+    println!("  Analyzing {}...", url);
+
+    // Step 1: Dual fetch (HTTP and Playwright)
+    let (http_content, js_content) = dual_fetch(url)?;
+
+    // Step 2: Extract content from both
+    let http_html = http_content.as_ref().map(|c| c.html.as_str());
+    let http_extracted = http_content.as_ref()
+        .and_then(|c| extract::extract(c, &Extraction::Auto).ok());
+    let js_extracted = js_content.as_ref()
+        .and_then(|c| extract::extract(c, &Extraction::Auto).ok());
+
+    // Step 3: Detect site type
+    let site_type = http_html.and_then(|html| fetch::detect_site_type(url, html));
+    if let Some(ref st) = site_type {
+        println!("  Detected: {}", st.cyan());
+    }
+
+    // Step 4: Discover feeds from HTML
+    let discovered_feeds = if let Some(html) = http_html {
+        println!("  Discovering feeds...");
+        let feeds = fetch::discover_feeds(url, html);
+        if !feeds.is_empty() {
+            println!("  Found {} feed(s)", feeds.len());
+        }
+        feeds
+    } else {
+        vec![]
+    };
+
+    // Step 5: Extract JSON-LD
+    let jsonld_data = http_html.and_then(|html| extract::extract_raw_jsonld(html));
+    if jsonld_data.is_some() {
+        println!("  Found JSON-LD structured data");
+    }
+
+    // Step 6: Run deep research analysis
+    println!("  Analyzing with AI (this may take a moment)...");
+    let research_result = match agent::deep_research_analysis(
+        url,
+        input,
+        http_extracted.as_deref(),
+        js_extracted.as_deref(),
+        &discovered_feeds,
+        jsonld_data.as_deref(),
+        site_type.as_deref(),
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("  Research failed: {} (using fallback)", e);
+            DeepResearchResult::fallback(url, input)
+        }
+    };
+
+    // Step 7: Display results
+    display_research_results(&research_result);
+
+    // Step 7.5: Apply URL modifications (variant params, etc.)
+    let modified_url = apply_url_modifications(url, &research_result);
+    if modified_url != url {
+        println!("  URL modified: {}", modified_url.cyan());
+    }
+
+    // Step 8: User confirmation or auto-accept
+    let (name, final_url, final_engine, final_extraction, final_interval, agent_enabled, agent_instructions) =
+        if yes {
+            // Auto-accept
+            let name = name_override.unwrap_or_else(|| {
+                if let Ok(parsed) = url::Url::parse(&modified_url) {
+                    generate_name_from_url(&parsed)
+                } else {
+                    "Watch".to_string()
+                }
+            });
+            let engine = research_result.engine.to_engine();
+            let extraction = match research_result.extraction.strategy.as_str() {
+                "selector" => {
+                    if let Some(ref sel) = research_result.extraction.selector {
+                        Extraction::Selector { selector: sel.clone() }
+                    } else {
+                        Extraction::Auto
+                    }
+                }
+                "rss" => Extraction::Rss,
+                "json_ld" => Extraction::JsonLd { types: None },
+                _ => Extraction::Auto,
+            };
+
+            (
+                name,
+                modified_url.clone(),
+                engine,
+                extraction,
+                research_result.interval_secs,
+                research_result.agent_instructions.is_some(),
+                research_result.agent_instructions.clone(),
+            )
+        } else if interactive {
+            // Interactive confirmation
+            confirm_research_results(
+                &modified_url,
+                &research_result,
+                &name_override,
+                default_interval,
+            )?
+        } else {
+            return Err(kto::KtoError::ConfigError(
+                "Deep research requires interactive mode or --yes flag".into()
+            ));
+        };
+
+    // Step 9: Fetch with final engine
+    println!("\n  Fetching with {:?} engine...", final_engine);
+    let content = fetch::fetch(&final_url, final_engine.clone(), &std::collections::HashMap::new())?;
+    let extracted = extract::extract(&content, &final_extraction)?;
+
+    // Step 10: Create watch
+    let mut watch = Watch::new(name.clone(), final_url);
+    watch.interval_secs = final_interval.max(10);
+    watch.engine = final_engine;
+    watch.extraction = final_extraction;
+    watch.tags = tags;
+    watch.use_profile = use_profile;
+
+    if agent_enabled {
+        watch.agent_config = Some(AgentConfig {
+            enabled: true,
+            prompt_template: None,
+            instructions: agent_instructions,
+        });
+    }
+
+    db.insert_watch(&watch)?;
+
+    // Create initial snapshot
+    let normalized = normalize(&extracted, &watch.normalization);
+    let hash = hash_content(&normalized);
+
+    let snapshot = Snapshot {
+        id: Uuid::new_v4(),
+        watch_id: watch.id,
+        fetched_at: Utc::now(),
+        raw_html: Some(zstd::encode_all(content.html.as_bytes(), 3)?),
+        extracted: normalized,
+        content_hash: hash.clone(),
+    };
+    db.insert_snapshot(&snapshot)?;
+
+    println!("\n  Created watch \"{}\"", name);
+    println!("  Initial hash: {}", &hash[..8]);
+    println!("  Engine: {:?}", watch.engine);
+    if watch.agent_config.is_some() {
+        println!("  AI Agent: enabled");
+    }
+    if watch.use_profile {
+        println!("  Profile: enabled");
+    }
+    if !watch.tags.is_empty() {
+        println!("  Tags: {}", watch.tags.join(", "));
+    }
+    println!("  Checking every {}", format_interval(watch.interval_secs));
+
+    // Prompt for notification setup if not configured
+    let mut config = Config::load()?;
+    if config.default_notify.is_none() && interactive && !yes {
+        println!();
+        if let Some(target) = super::prompt_notification_setup()? {
+            config.default_notify = Some(target);
+            config.save()?;
+            println!("  Notification settings saved.");
+        }
+    }
+
+    if !is_daemon_running() {
+        println!("\n  Run `kto daemon` to start monitoring.");
+    }
+
+    Ok(())
+}
+
+/// Apply URL modifications from research results (variant params, etc.)
+fn apply_url_modifications(url: &str, result: &DeepResearchResult) -> String {
+    if let Some(ref mods) = result.url_modifications {
+        if let Some(ref variant) = mods.variant_param {
+            if !variant.is_empty() {
+                if url.contains('?') {
+                    return format!("{}&variant={}", url, variant);
+                } else {
+                    return format!("{}?variant={}", url, variant);
+                }
+            }
+        }
+    }
+    url.to_string()
+}
+
+/// Display deep research results
+fn display_research_results(result: &DeepResearchResult) {
+    println!();
+    println!("  {}", "Deep Research Results".bold().underline());
+    println!();
+    println!("  {}", result.summary);
+
+    // Web research findings (if available)
+    if let Some(ref web) = result.web_research {
+        println!();
+        println!("  {}:", "Web Research".bold());
+        if !web.queries_made.is_empty() {
+            println!("    Searched: {}", web.queries_made.join(", "));
+        }
+        for finding in &web.relevant_findings {
+            println!("    • {}", finding);
+        }
+        if !web.api_endpoints.is_empty() {
+            println!();
+            println!("  Discovered APIs:");
+            for api in &web.api_endpoints {
+                let auth = if api.requires_auth { " (auth required)" } else { "" };
+                println!("    {} - {}{}", api.url_pattern, api.description, auth);
+            }
+        }
+        if !web.community_tips.is_empty() {
+            println!();
+            println!("  Community Tips:");
+            for tip in &web.community_tips {
+                println!("    • {}", tip);
+            }
+        }
+    }
+
+    // Discovered feeds
+    if !result.discovered_feeds.is_empty() {
+        println!();
+        println!("  {}:", "Discovered Feeds".bold());
+        for feed in &result.discovered_feeds {
+            let intent_marker = if feed.matches_intent {
+                " ← matches intent".green().to_string()
+            } else {
+                "".to_string()
+            };
+            println!("    {} ({}, via {}){}", feed.url, feed.feed_type, feed.discovery_method, intent_marker);
+        }
+    }
+
+    // Recommended approach
+    println!();
+    println!("  {}:", "Recommended Approach".bold());
+    println!("    Engine: {}", result.engine.engine_type.cyan());
+    println!("      {}", result.engine.reason.dimmed());
+    println!("    Extraction: {}", result.extraction.strategy.cyan());
+    if let Some(ref sel) = result.extraction.selector {
+        println!("      Selector: {}", sel);
+    }
+    println!("      {}", result.extraction.reason.dimmed());
+
+    // URL modifications
+    if let Some(ref mods) = result.url_modifications {
+        if mods.variant_param.is_some() {
+            println!("    URL Mod: variant={}", mods.variant_param.as_ref().unwrap().cyan());
+            println!("      {}", mods.reason.dimmed());
+        }
+    }
+
+    // Recommended selectors
+    if !result.selectors.is_empty() {
+        println!();
+        println!("  Stable Selectors:");
+        for sel in &result.selectors {
+            let stability = format!("{:.0}%", sel.stability_score * 100.0);
+            println!("    {} ({})", sel.selector, stability.dimmed());
+            println!("      {}", sel.description.dimmed());
+        }
+    }
+
+    // Key insights
+    if !result.insights.is_empty() {
+        println!();
+        println!("  {}:", "Key Insights".bold());
+        for insight in &result.insights {
+            println!("    • {}", insight);
+        }
+    }
+
+    // Agent instructions
+    if let Some(ref instructions) = result.agent_instructions {
+        println!();
+        println!("  AI Instructions: \"{}\"", truncate_str(instructions, 60));
+    }
+
+    // Confidence
+    println!();
+    let confidence_color = if result.confidence >= 0.8 {
+        format!("{:.0}%", result.confidence * 100.0).green()
+    } else if result.confidence >= 0.5 {
+        format!("{:.0}%", result.confidence * 100.0).yellow()
+    } else {
+        format!("{:.0}%", result.confidence * 100.0).red()
+    };
+    println!("  Confidence: {}", confidence_color);
+    println!();
+}
+
+/// Interactive confirmation of research results
+fn confirm_research_results(
+    url: &str,
+    result: &DeepResearchResult,
+    name_override: &Option<String>,
+    _default_interval: u64,
+) -> Result<(String, String, Engine, Extraction, u64, bool, Option<String>)> {
+    // Check if there's a feed that matches intent
+    let matching_feed = result.discovered_feeds.iter().find(|f| f.matches_intent);
+
+    // Build choices
+    let mut choices = vec!["Accept recommendations", "Customize"];
+
+    // Add option to use matching feed if available
+    if matching_feed.is_some() {
+        choices.insert(1, "Use discovered feed");
+    }
+
+    choices.push("Cancel");
+
+    let choice = Select::new("What would you like to do?", choices)
+        .prompt()
+        .map_err(|e| kto::KtoError::ConfigError(e.to_string()))?;
+
+    match choice {
+        "Accept recommendations" => {
+            let name = match name_override {
+                Some(n) => n.clone(),
+                None => {
+                    let default_name = if let Ok(parsed) = url::Url::parse(url) {
+                        generate_name_from_url(&parsed)
+                    } else {
+                        "Watch".to_string()
+                    };
+                    Text::new("Name for this watch?")
+                        .with_default(&default_name)
+                        .prompt()
+                        .map_err(|e| kto::KtoError::ConfigError(e.to_string()))?
+                }
+            };
+
+            let engine = result.engine.to_engine();
+            let extraction = match result.extraction.strategy.as_str() {
+                "selector" => {
+                    if let Some(ref sel) = result.extraction.selector {
+                        Extraction::Selector { selector: sel.clone() }
+                    } else {
+                        Extraction::Auto
+                    }
+                }
+                "rss" => Extraction::Rss,
+                "json_ld" => Extraction::JsonLd { types: None },
+                _ => Extraction::Auto,
+            };
+
+            Ok((
+                name,
+                url.to_string(),
+                engine,
+                extraction,
+                result.interval_secs,
+                result.agent_instructions.is_some(),
+                result.agent_instructions.clone(),
+            ))
+        }
+        "Use discovered feed" => {
+            let feed = matching_feed.expect("Feed should exist");
+            let name = match name_override {
+                Some(n) => n.clone(),
+                None => {
+                    let default_name = feed.title.clone().unwrap_or_else(|| {
+                        if let Ok(parsed) = url::Url::parse(&feed.url) {
+                            generate_name_from_url(&parsed)
+                        } else {
+                            "Watch".to_string()
+                        }
+                    });
+                    Text::new("Name for this watch?")
+                        .with_default(&default_name)
+                        .prompt()
+                        .map_err(|e| kto::KtoError::ConfigError(e.to_string()))?
+                }
+            };
+
+            println!("  Using feed: {}", feed.url.cyan());
+
+            Ok((
+                name,
+                feed.url.clone(),
+                Engine::Rss,
+                Extraction::Rss,
+                result.interval_secs,
+                false, // RSS feeds usually don't need AI
+                None,
+            ))
+        }
+        "Customize" => {
+            // Full customization
+            let name = Text::new("Name for this watch?")
+                .with_default(&name_override.clone().unwrap_or_else(|| {
+                    if let Ok(parsed) = url::Url::parse(url) {
+                        generate_name_from_url(&parsed)
+                    } else {
+                        "Watch".to_string()
+                    }
+                }))
+                .prompt()
+                .map_err(|e| kto::KtoError::ConfigError(e.to_string()))?;
+
+            // Engine selection
+            let engine_choices = vec!["HTTP", "JavaScript (Playwright)", "RSS"];
+            let default_engine_idx = match result.engine.engine_type.as_str() {
+                "playwright" | "js" => 1,
+                "rss" => 2,
+                _ => 0,
+            };
+            let engine_choice = Select::new("Engine:", engine_choices)
+                .with_starting_cursor(default_engine_idx)
+                .prompt()
+                .map_err(|e| kto::KtoError::ConfigError(e.to_string()))?;
+
+            let engine = match engine_choice {
+                "JavaScript (Playwright)" => Engine::Playwright,
+                "RSS" => Engine::Rss,
+                _ => Engine::Http,
+            };
+
+            // Extraction strategy
+            let extraction = if engine == Engine::Rss {
+                Extraction::Rss
+            } else {
+                let extraction_choices = vec!["Auto", "CSS Selector", "JSON-LD"];
+                let extraction_choice = Select::new("Extraction:", extraction_choices)
+                    .prompt()
+                    .map_err(|e| kto::KtoError::ConfigError(e.to_string()))?;
+
+                match extraction_choice {
+                    "CSS Selector" => {
+                        let default_sel = result.extraction.selector.as_deref()
+                            .or_else(|| result.selectors.first().map(|s| s.selector.as_str()))
+                            .unwrap_or("");
+                        let sel = Text::new("CSS Selector:")
+                            .with_default(default_sel)
+                            .prompt()
+                            .map_err(|e| kto::KtoError::ConfigError(e.to_string()))?;
+                        Extraction::Selector { selector: sel }
+                    }
+                    "JSON-LD" => Extraction::JsonLd { types: None },
+                    _ => Extraction::Auto,
+                }
+            };
+
+            // Interval
+            let interval_str = Text::new("Check interval (e.g., 5m, 1h)?")
+                .with_default(&format_interval(result.interval_secs))
+                .prompt()
+                .map_err(|e| kto::KtoError::ConfigError(e.to_string()))?;
+
+            let interval = crate::utils::parse_interval_str(&interval_str)
+                .unwrap_or(result.interval_secs);
+
+            // AI agent
+            let use_ai = Confirm::new("Enable AI analysis?")
+                .with_default(result.agent_instructions.is_some())
+                .prompt()
+                .unwrap_or(false);
+
+            let instructions = if use_ai {
+                let inst = Text::new("AI instructions:")
+                    .with_default(result.agent_instructions.as_deref().unwrap_or(""))
+                    .prompt()
+                    .map_err(|e| kto::KtoError::ConfigError(e.to_string()))?;
+                if inst.is_empty() { None } else { Some(inst) }
+            } else {
+                None
+            };
+
+            Ok((name, url.to_string(), engine, extraction, interval, use_ai, instructions))
+        }
+        "Cancel" | _ => {
+            Err(kto::KtoError::ConfigError("Watch creation cancelled".into()))
         }
     }
 }

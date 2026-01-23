@@ -663,6 +663,217 @@ fn determine_engine(
     (Engine::Http, message)
 }
 
+/// A discovered RSS/Atom feed
+#[derive(Debug, Clone)]
+pub struct DiscoveredFeed {
+    /// Full URL to the feed
+    pub url: String,
+    /// Title if found
+    pub title: Option<String>,
+    /// Feed type: "rss", "atom", "json"
+    pub feed_type: String,
+    /// How it was discovered: "link-tag", "common-path", "sitemap"
+    pub discovery_method: String,
+}
+
+/// Common feed paths to probe
+const COMMON_FEED_PATHS: &[&str] = &[
+    "/feed",
+    "/rss",
+    "/atom",
+    "/feed.xml",
+    "/rss.xml",
+    "/atom.xml",
+    "/index.xml",
+    "/feed.rss",
+    "/blog/feed",
+    "/blog/rss",
+    "/news/rss",
+    "/posts.atom",
+    "/.rss",
+];
+
+/// Discover RSS/Atom feeds from a page
+pub fn discover_feeds(base_url: &str, html: &str) -> Vec<DiscoveredFeed> {
+    let mut feeds = Vec::new();
+    let document = scraper::Html::parse_document(html);
+
+    // 1. Parse <link rel="alternate" type="application/rss+xml"> tags
+    if let Ok(selector) = scraper::Selector::parse(
+        r#"link[rel="alternate"][type="application/rss+xml"],
+           link[rel="alternate"][type="application/atom+xml"],
+           link[rel="alternate"][type="application/feed+json"]"#
+    ) {
+        for el in document.select(&selector) {
+            if let Some(href) = el.value().attr("href") {
+                if let Some(resolved) = resolve_url(base_url, href) {
+                    let feed_type = el.value().attr("type")
+                        .map(|t| {
+                            if t.contains("atom") { "atom" }
+                            else if t.contains("json") { "json" }
+                            else { "rss" }
+                        })
+                        .unwrap_or("rss");
+
+                    let title = el.value().attr("title").map(String::from);
+
+                    feeds.push(DiscoveredFeed {
+                        url: resolved,
+                        title,
+                        feed_type: feed_type.to_string(),
+                        discovery_method: "link-tag".to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    // 2. Try common feed paths
+    if let Ok(parsed_base) = url::Url::parse(base_url) {
+        for path in COMMON_FEED_PATHS {
+            let mut probe_url = parsed_base.clone();
+
+            // Handle suffix vs path
+            if path.starts_with("/.") {
+                // Suffix like "/.rss" - append to current path
+                let current = probe_url.path().to_string();
+                probe_url.set_path(&format!("{}{}", current.trim_end_matches('/'), path));
+            } else {
+                // Absolute path
+                probe_url.set_path(path);
+            }
+
+            // Check if this URL is already in our list
+            let url_str = probe_url.to_string();
+            if feeds.iter().any(|f| f.url == url_str) {
+                continue;
+            }
+
+            // Try to fetch and verify it's a valid feed
+            if let Ok(true) = probe_is_feed(&url_str) {
+                let feed_type = if path.contains("atom") { "atom" }
+                    else if path.contains("json") { "json" }
+                    else { "rss" };
+
+                feeds.push(DiscoveredFeed {
+                    url: url_str,
+                    title: None,
+                    feed_type: feed_type.to_string(),
+                    discovery_method: "common-path".to_string(),
+                });
+            }
+        }
+    }
+
+    feeds
+}
+
+/// Probe a URL to check if it returns a valid feed
+fn probe_is_feed(url: &str) -> Result<bool> {
+    let request = HTTP_AGENT.get(url)
+        .header("User-Agent", "Mozilla/5.0 (compatible; kto/0.1)");
+
+    match request.call() {
+        Ok(response) => {
+            // Check content-type header
+            if let Some(ct) = response.headers().get("content-type") {
+                if let Ok(ct_str) = ct.to_str() {
+                    if ct_str.contains("xml") || ct_str.contains("rss")
+                        || ct_str.contains("atom") || ct_str.contains("feed") {
+                        return Ok(true);
+                    }
+                }
+            }
+
+            // Check content prefix
+            if let Ok(body) = response.into_body().read_to_string() {
+                Ok(detect_rss_content(&body))
+            } else {
+                Ok(false)
+            }
+        }
+        Err(_) => Ok(false),
+    }
+}
+
+/// Detect the type of site/platform from HTML content
+pub fn detect_site_type(url: &str, html: &str) -> Option<String> {
+    let lower_html = html.to_lowercase();
+
+    // Check for common platform signatures
+
+    // Shopify
+    if lower_html.contains("shopify")
+        || lower_html.contains("cdn.shopify.com")
+        || lower_html.contains("myshopify.com") {
+        return Some("Shopify store".to_string());
+    }
+
+    // WordPress
+    if lower_html.contains("wp-content")
+        || lower_html.contains("wordpress")
+        || lower_html.contains("wp-json") {
+        return Some("WordPress site".to_string());
+    }
+
+    // Wix
+    if lower_html.contains("wix.com")
+        || lower_html.contains("wixstatic.com") {
+        return Some("Wix site".to_string());
+    }
+
+    // Squarespace
+    if lower_html.contains("squarespace")
+        || lower_html.contains("sqsp.net") {
+        return Some("Squarespace site".to_string());
+    }
+
+    // Webflow
+    if lower_html.contains("webflow.com") {
+        return Some("Webflow site".to_string());
+    }
+
+    // BigCommerce
+    if lower_html.contains("bigcommerce")
+        || lower_html.contains("bc-sf-filter") {
+        return Some("BigCommerce store".to_string());
+    }
+
+    // WooCommerce
+    if lower_html.contains("woocommerce")
+        || lower_html.contains("wc-product") {
+        return Some("WooCommerce store".to_string());
+    }
+
+    // Magento
+    if lower_html.contains("magento")
+        || lower_html.contains("mage-init") {
+        return Some("Magento store".to_string());
+    }
+
+    // GitHub
+    if let Ok(parsed) = url::Url::parse(url) {
+        if parsed.host_str() == Some("github.com") {
+            return Some("GitHub repository".to_string());
+        }
+        if parsed.host_str() == Some("gitlab.com") {
+            return Some("GitLab repository".to_string());
+        }
+    }
+
+    // Check meta generator tag
+    if let Ok(selector) = scraper::Selector::parse("meta[name='generator']") {
+        let document = scraper::Html::parse_document(html);
+        if let Some(meta) = document.select(&selector).next() {
+            if let Some(generator) = meta.value().attr("content") {
+                return Some(format!("{} site", generator.split_whitespace().next().unwrap_or("Unknown")));
+            }
+        }
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -712,5 +923,43 @@ mod tests {
         assert!(detect_rss_content("<?xml version=\"1.0\"?><rss version=\"2.0\">"));
         assert!(detect_rss_content("<feed xmlns=\"http://www.w3.org/2005/Atom\">"));
         assert!(!detect_rss_content("<html><head></head><body></body></html>"));
+    }
+
+    #[test]
+    fn test_discover_feeds_from_link_tags() {
+        let html = r#"
+            <html>
+            <head>
+                <link rel="alternate" type="application/rss+xml" href="/feed.xml" title="RSS Feed">
+                <link rel="alternate" type="application/atom+xml" href="https://example.com/atom.xml">
+            </head>
+            <body></body>
+            </html>
+        "#;
+        let feeds = discover_feeds("https://example.com/page", html);
+        assert_eq!(feeds.len(), 2);
+        assert_eq!(feeds[0].feed_type, "rss");
+        assert_eq!(feeds[0].discovery_method, "link-tag");
+        assert_eq!(feeds[1].feed_type, "atom");
+    }
+
+    #[test]
+    fn test_detect_site_type_shopify() {
+        let html = r#"<html><head><script src="https://cdn.shopify.com/s/files/1/0123/shop.js"></script></head></html>"#;
+        let site_type = detect_site_type("https://example.com", html);
+        assert_eq!(site_type, Some("Shopify store".to_string()));
+    }
+
+    #[test]
+    fn test_detect_site_type_wordpress() {
+        let html = r#"<html><head><link rel="stylesheet" href="/wp-content/themes/style.css"></head></html>"#;
+        let site_type = detect_site_type("https://example.com", html);
+        assert_eq!(site_type, Some("WordPress site".to_string()));
+    }
+
+    #[test]
+    fn test_detect_site_type_github() {
+        let site_type = detect_site_type("https://github.com/user/repo", "<html></html>");
+        assert_eq!(site_type, Some("GitHub repository".to_string()));
     }
 }

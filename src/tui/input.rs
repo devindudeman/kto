@@ -44,6 +44,7 @@ pub fn handle_key_event(app: &mut App, key: KeyCode, modifiers: KeyModifiers) ->
         Mode::FilterEdit => handle_filter_edit_input(app, key),
         Mode::MemoryInspector => handle_memory_inspector_input(app, key),
         Mode::ProfileInspector => handle_profile_inspector_input(app, key),
+        Mode::Health => handle_health_input(app, key),
     }
 }
 
@@ -319,6 +320,11 @@ fn handle_normal_input(app: &mut App, key: KeyCode, modifiers: KeyModifiers) -> 
                 }
             }
         }
+        KeyCode::Char('H') => {
+            // Open health dashboard
+            app.health_dashboard_state = Some(HealthDashboardState::new());
+            app.mode = Mode::Health;
+        }
         KeyCode::Char('r') => {
             app.refresh()?;
             app.status_message = Some("Refreshed".to_string());
@@ -448,20 +454,62 @@ fn handle_wizard_input(app: &mut App, key: KeyCode) -> Result<()> {
                 }
             }
             KeyCode::BackTab => wizard.prev_step(),
+            // Template navigation
+            KeyCode::Char('j') | KeyCode::Down if wizard.step == WizardStep::Template => {
+                let templates = WatchTemplate::all();
+                let current_idx = templates.iter().position(|t| *t == wizard.template).unwrap_or(0);
+                let next_idx = (current_idx + 1) % templates.len();
+                wizard.template = templates[next_idx].clone();
+            }
+            KeyCode::Char('k') | KeyCode::Up if wizard.step == WizardStep::Template => {
+                let templates = WatchTemplate::all();
+                let current_idx = templates.iter().position(|t| *t == wizard.template).unwrap_or(0);
+                let next_idx = if current_idx == 0 { templates.len() - 1 } else { current_idx - 1 };
+                wizard.template = templates[next_idx].clone();
+            }
+            KeyCode::Char(' ') if wizard.step == WizardStep::Template => {
+                // Space also cycles through templates
+                let templates = WatchTemplate::all();
+                let current_idx = templates.iter().position(|t| *t == wizard.template).unwrap_or(0);
+                let next_idx = (current_idx + 1) % templates.len();
+                wizard.template = templates[next_idx].clone();
+            }
             KeyCode::Char(' ') if wizard.step == WizardStep::Agent => {
                 wizard.agent_enabled = !wizard.agent_enabled;
             }
             KeyCode::Char(' ') if wizard.step == WizardStep::Engine => {
-                wizard.engine = match wizard.engine {
-                    Engine::Http => Engine::Playwright,
-                    Engine::Playwright => Engine::Rss,
-                    Engine::Rss => Engine::Http,
-                    Engine::Shell { .. } => Engine::Http,
-                };
-                if wizard.engine == Engine::Rss {
-                    wizard.extraction = "rss".to_string();
-                } else if wizard.extraction == "rss" {
-                    wizard.extraction = "auto".to_string();
+                // Only cycle engines if no transform suggestion (or it was cleared)
+                if wizard.transform_suggestion.is_none() {
+                    wizard.engine = match wizard.engine {
+                        Engine::Http => Engine::Playwright,
+                        Engine::Playwright => Engine::Rss,
+                        Engine::Rss => Engine::Http,
+                        Engine::Shell { .. } => Engine::Http,
+                    };
+                    if wizard.engine == Engine::Rss {
+                        wizard.extraction = "rss".to_string();
+                    } else if wizard.extraction == "rss" {
+                        wizard.extraction = "auto".to_string();
+                    }
+                }
+            }
+            // Decline transform suggestion - use original URL
+            KeyCode::Char('x') if wizard.step == WizardStep::Engine && wizard.transform_suggestion.is_some() => {
+                wizard.clear_transform();
+                app.status_message = Some("Using original URL".to_string());
+            }
+            // Test extraction in Review step
+            KeyCode::Char('t') if wizard.step == WizardStep::Review => {
+                app.status_message = Some("Testing extraction...".to_string());
+                match test_wizard_extraction(wizard) {
+                    Ok(preview) => {
+                        wizard.test_result = Some(preview);
+                        app.status_message = Some("Test successful!".to_string());
+                    }
+                    Err(e) => {
+                        wizard.test_result = Some(format!("Error: {}", e));
+                        app.status_message = Some(format!("Test failed: {}", e));
+                    }
                 }
             }
             KeyCode::Char('e') if wizard.step == WizardStep::Agent => {
@@ -522,6 +570,31 @@ fn handle_wizard_input(app: &mut App, key: KeyCode) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Test extraction for the wizard
+fn test_wizard_extraction(wizard: &WizardState) -> Result<String> {
+    use crate::fetch::fetch;
+    use crate::extract;
+
+    // Fetch the URL
+    let content = fetch(&wizard.url, wizard.engine.clone(), &std::collections::HashMap::new())?;
+
+    // Parse extraction
+    let extraction = parse_extraction_string(&wizard.extraction);
+
+    // Extract content
+    let extracted = extract::extract(&content, &extraction)?;
+
+    // Return truncated preview
+    let preview_len = 200;
+    let preview = if extracted.len() > preview_len {
+        format!("{}... ({} chars total)", &extracted[..preview_len], extracted.len())
+    } else {
+        extracted
+    };
+
+    Ok(preview)
 }
 
 fn create_watch_from_wizard(app: &mut App, wizard: &WizardState) -> Result<()> {
@@ -1163,6 +1236,31 @@ fn handle_profile_inspector_input(app: &mut App, key: KeyCode) -> Result<()> {
             }
             _ => {}
         }
+    }
+    Ok(())
+}
+
+fn handle_health_input(app: &mut App, key: KeyCode) -> Result<()> {
+    match key {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            app.health_dashboard_state = None;
+            app.mode = Mode::Normal;
+        }
+        KeyCode::Char('r') => {
+            // Refresh health data
+            app.refresh()?;
+            app.health_dashboard_state = Some(HealthDashboardState::new());
+            app.status_message = Some("Health data refreshed".to_string());
+        }
+        KeyCode::Char('L') => {
+            // Open logs
+            app.all_changes = app.db.get_all_recent_changes(50)?;
+            app.selected_log = 0;
+            app.scroll_offset = 0;
+            app.health_dashboard_state = None;
+            app.mode = Mode::Logs;
+        }
+        _ => {}
     }
     Ok(())
 }

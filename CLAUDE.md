@@ -57,6 +57,7 @@ src/
 ├── notify.rs            # Notification dispatch (ntfy, Gotify, Slack, Discord, Telegram, Pushover, Matrix)
 ├── agent.rs             # Claude CLI integration for AI analysis
 ├── config.rs            # Global configuration, NotifyTarget
+├── transforms.rs        # URL transform rules for known sites (GitHub, GitLab, Reddit, etc.)
 ├── tui/                 # Ratatui-based terminal dashboard (feature-gated)
 │   ├── mod.rs           # Entry point, event loop, re-exports
 │   ├── types.rs         # Enums (Mode, Pane, EditField, etc.)
@@ -210,6 +211,145 @@ kto test "My Watch"
 kto test "My Watch" --json
 ```
 
+## URL Transform System
+
+kto includes an intent-based URL transform system that detects when users want to monitor well-known sites (GitHub, GitLab, Reddit, etc.) and automatically suggests optimal URLs and engines.
+
+### How It Works
+
+1. **Intent Detection**: kto detects user intent from keywords in the command (e.g., "releases", "news", "price")
+2. **Rule Matching**: Rules check if the URL matches a known pattern (e.g., `github.com/*/*`)
+3. **Transform Suggestion**: If a match is found, kto suggests a better URL (e.g., `/releases.atom`)
+4. **User Choice**: User can accept the suggestion or use the original URL
+
+### Supported Sites
+
+| Site | Intent | Transform | Engine |
+|------|--------|-----------|--------|
+| github.com | Release | `/releases.atom` | RSS |
+| gitlab.com | Release | `/-/releases.atom` | RSS |
+| codeberg.org | Release | `/releases.rss` | RSS |
+| news.ycombinator.com | News | `/rss` | RSS |
+| reddit.com | News | `.rss` | RSS |
+| pypi.org | Release | `/rss` | RSS |
+| crates.io | Release | `/versions` | HTTP |
+| hub.docker.com | Release | `/tags` | Playwright |
+
+### Examples
+
+```bash
+# GitHub releases - kto suggests releases.atom feed
+$ kto new "https://github.com/astral-sh/ruff for new releases"
+  Detected: GitHub releases Atom feed
+  URL: https://github.com/astral-sh/ruff/releases.atom
+  Engine: RSS
+
+# Reddit subreddit - kto suggests RSS feed
+$ kto new "https://reddit.com/r/rust for news"
+  Detected: Reddit subreddit RSS feed
+  URL: https://reddit.com/r/rust.rss
+  Engine: RSS
+
+# Unknown site - falls back to AI analysis
+$ kto new "https://example.com/product for price drops"
+  Analyzing with AI...
+```
+
+### Intent Keywords
+
+| Intent | Keywords |
+|--------|----------|
+| Release | release, changelog, version, update |
+| Price | price, deal, discount, sale, cost, $ |
+| Stock | stock, available, availability, back in, restock |
+| Jobs | job, career, hiring, position, opening |
+| News | news, article, blog, post, feed |
+
+### TUI Integration
+
+In the TUI wizard (`n` key), when using templates like "Changelog/Release Watcher":
+1. Select the template
+2. Enter a GitHub/GitLab URL
+3. kto automatically detects the feed URL
+4. Press `Tab` to accept or `x` to use original URL
+
+### Adding New Rules
+
+Rules are defined in `src/transforms.rs` as declarative structs:
+
+```rust
+TransformRule {
+    host: "github.com",
+    path_pattern: Some("*/*"),       // matches /owner/repo
+    intent: Intent::Release,
+    transform: UrlTransform::AppendPath("/releases.atom"),
+    engine: Engine::Rss,
+    confidence: 0.95,
+    description: "GitHub releases Atom feed",
+}
+```
+
+## Deep Research Mode
+
+When the wizard's simple approaches fail (URL transforms don't match, basic AI analysis has low confidence), deep research mode allows Claude to spend more tokens thoroughly analyzing a page.
+
+### Usage
+
+```bash
+# Explicit opt-in with --research flag
+kto new "https://shop.example.com/product for price drops" --research
+
+# When basic analysis has low confidence, kto suggests using deep research
+kto new "https://shop.example.com/product for price drops"
+  Analyzing...
+  Low confidence (45%). Tip: Use --research for thorough page analysis
+```
+
+### What Deep Research Does
+
+1. **Dual fetch**: Fetches with both HTTP and Playwright (JavaScript) to compare content
+2. **Site type detection**: Identifies platform (Shopify, WordPress, WooCommerce, etc.)
+3. **Feed discovery**: Discovers RSS/Atom feeds from link tags and common paths
+4. **JSON-LD extraction**: Extracts structured data for stable monitoring
+5. **Web search** (if available): Searches for site-specific APIs and monitoring tips
+6. **Selector stability analysis**: Recommends stable CSS selectors
+
+### Output
+
+```
+  Deep Research Results
+
+  Summary: Discovered hidden JSON API that's more reliable than scraping
+
+  Web Research Findings:
+    - Searched: "shopify product api", "monitor shopify availability"
+    - Found: Shopify stores expose /products/[handle].json endpoint
+
+  Discovered Feeds:
+    - /collections/all.atom (products only, no stock info)
+
+  Discovered APIs:
+    - /products/widget.json - Returns full product data including variants
+
+  Recommended Approach:
+    Engine: HTTP (JSON API doesn't need JS)
+    Extraction: JSON path $.product.variants[*].available
+      Price in structured data is more stable than DOM selectors
+
+  Key Insights:
+    - JSON API found via web search - not in page HTML
+    - API updates before DOM, catch restocks faster
+
+  Confidence: 95%
+```
+
+### Implementation Details
+
+- Uses Claude CLI with `--max-turns 5` and `--allowedTools WebSearch,WebFetch` for web search
+- Falls back to page-only analysis if web search is unavailable
+- Discovers feeds via `<link rel="alternate">` tags and common paths like `/feed`, `/rss`, etc.
+- Detects site type from HTML signatures (Shopify, WordPress, WooCommerce, etc.)
+
 ## Testing & Development
 
 ### Test Database Isolation
@@ -306,10 +446,11 @@ Run with `kto ui`:
 | `p` | Pause/Resume watch or reminder |
 | `t` | Test watch (read-only preview) |
 | `c` | Force check (saves snapshot) |
-| `n` | New watch/reminder (context-aware wizard) |
+| `n` | New watch/reminder (context-aware wizard with templates) |
 | `D` | Describe watch (view full config) |
 | `e` | Edit watch or reminder |
 | `d` | Delete watch or reminder |
+| `H` | Health dashboard (daemon status, watch health) |
 | `L` | Activity logs (all changes across watches) |
 | `N` | Notification setup |
 | `M` | View agent memory (watches pane) |
@@ -319,6 +460,14 @@ Run with `kto ui`:
 | `q` | Quit |
 | Mouse click | Select watches/changes/reminders, click wizard buttons |
 
+### Status Indicators
+| Symbol | Meaning |
+|--------|---------|
+| `●` | Active, checked recently (healthy) |
+| `◐` | Active but stale (no check in 2x interval) |
+| `○` | Paused |
+| `✗` | Error |
+
 ### Change Diff View
 | Key | Action |
 |-----|--------|
@@ -327,10 +476,11 @@ Run with `kto ui`:
 | `Esc/q` | Close |
 
 ### Status Bar
-The status bar shows contextual information:
-- **Watches pane**: "5 watches (3 active, 2 AI)"
-- **Changes pane**: "Watch Name > Change #1" (breadcrumb)
-- **Reminders pane**: "3 reminders (2 active)"
+The status bar shows:
+- Watch count with active/AI breakdown
+- Daemon status indicator (running/stale/stopped)
+- Rotating pro tips when idle
+- Contextual hints for current mode
 
 ### Edit Mode
 | Key | Action |
@@ -362,3 +512,26 @@ The status bar shows contextual information:
 | `C` | Clear all memory |
 | `r` | Refresh |
 | `Esc` | Close |
+
+### Watch Wizard Templates
+When creating a new watch (`n`), the wizard starts with template selection:
+- **Custom** - Start from scratch with full control
+- **Price Drop Monitor** - Pre-configured AI instructions for tracking price drops
+- **Back-in-Stock Alert** - Monitor availability changes
+- **Job Posting Tracker** - Track new job listings, ignore updates
+- **Changelog/Release Watcher** - Monitor software releases and updates
+
+Templates pre-fill AI agent settings with appropriate instructions.
+
+### Health Dashboard (`H`)
+| Key | Action |
+|-----|--------|
+| `r` | Refresh health data |
+| `L` | Open activity logs |
+| `Esc` | Close |
+
+Shows:
+- Daemon status (running/stale/stopped)
+- Watch health breakdown (healthy/stale/error/paused)
+- Notification configuration
+- Quiet hours status

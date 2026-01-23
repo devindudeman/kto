@@ -33,10 +33,11 @@ fn run() -> Result<()> {
             clipboard,
             tag,
             use_profile,
+            research,
             yes,
         } => commands::cmd_new(
             description, name, interval, js, rss, shell, agent,
-            agent_instructions, selector, clipboard, tag, use_profile, yes,
+            agent_instructions, selector, clipboard, tag, use_profile, research, yes,
         ),
 
         Commands::List { verbose, tag, json } => commands::cmd_list(verbose, tag, json),

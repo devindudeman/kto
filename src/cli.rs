@@ -91,6 +91,10 @@ pub enum Commands {
         #[arg(long)]
         use_profile: bool,
 
+        /// Enable deep research mode for thorough page analysis (uses more tokens)
+        #[arg(long, alias = "deep")]
+        research: bool,
+
         /// Skip all interactive prompts
         #[arg(short = 'y', long)]
         yes: bool,

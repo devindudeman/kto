@@ -511,148 +511,153 @@ pub fn cmd_init() -> Result<()> {
     println!("\n{}", "Step 2: Set up notifications".bold());
 
     let config = Config::load()?;
-    let has_notification = config.default_notify.is_some();
 
-    if has_notification {
-        println!("  Notification target already configured.");
+    // Determine if we should run notification setup
+    let run_setup = if let Some(ref target) = config.default_notify {
+        println!("  Current: {}", crate::commands::describe_notify_target(target));
+        let change = Confirm::new("Would you like to change notification settings?")
+            .with_default(false)
+            .prompt();
+        matches!(change, Ok(true))
     } else {
-        let setup_notifications = Confirm::new("Would you like to set up notifications now?")
+        let setup = Confirm::new("Would you like to set up notifications now?")
             .with_default(true)
             .prompt();
+        matches!(setup, Ok(true))
+    };
 
-        match setup_notifications {
-            Ok(true) => {
-                let options = vec![
-                    "ntfy (recommended - free, simple push notifications)",
-                    "Slack (webhook)",
-                    "Discord (webhook)",
-                    "Telegram (bot)",
-                    "Gotify (self-hosted)",
-                    "Pushover",
-                    "Matrix",
-                    "Skip for now",
-                ];
+    if run_setup {
+        let options = vec![
+            "ntfy (recommended - free, simple push notifications)",
+            "Slack (webhook)",
+            "Discord (webhook)",
+            "Telegram (bot)",
+            "Gotify (self-hosted)",
+            "Pushover",
+            "Matrix",
+            "Skip for now",
+        ];
 
-                let choice = Select::new("Which notification service would you like to use?", options)
-                    .prompt();
+        let choice = Select::new("Which notification service would you like to use?", options)
+            .prompt();
 
-                match choice {
-                    Ok(selected) => {
-                        if selected.starts_with("ntfy") {
-                            let topic = Text::new("Enter your ntfy topic (e.g., my-alerts):")
-                                .prompt();
-                            if let Ok(topic) = topic {
-                                if !topic.is_empty() {
-                                    crate::commands::cmd_notify_set(
-                                        Some(topic), None, None, None, None, None,
-                                        None, None, None, None, None, None, None,
-                                    )?;
-                                    println!("  {} ntfy notifications configured!", "✓".green());
-                                }
-                            }
-                        } else if selected.starts_with("Slack") {
-                            let webhook = Password::new("Enter your Slack webhook URL:")
-                                .without_confirmation()
-                                .prompt();
-                            if let Ok(webhook) = webhook {
-                                if !webhook.is_empty() {
-                                    crate::commands::cmd_notify_set(
-                                        None, Some(webhook), None, None, None, None,
-                                        None, None, None, None, None, None, None,
-                                    )?;
-                                    println!("  {} Slack notifications configured!", "✓".green());
-                                }
-                            }
-                        } else if selected.starts_with("Discord") {
-                            let webhook = Password::new("Enter your Discord webhook URL:")
-                                .without_confirmation()
-                                .prompt();
-                            if let Ok(webhook) = webhook {
-                                if !webhook.is_empty() {
-                                    crate::commands::cmd_notify_set(
-                                        None, None, Some(webhook), None, None, None,
-                                        None, None, None, None, None, None, None,
-                                    )?;
-                                    println!("  {} Discord notifications configured!", "✓".green());
-                                }
-                            }
-                        } else if selected.starts_with("Telegram") {
-                            let token = Password::new("Enter your Telegram bot token:")
-                                .without_confirmation()
-                                .prompt();
-                            let chat = Text::new("Enter your Telegram chat ID:")
-                                .prompt();
-                            if let (Ok(token), Ok(chat)) = (token, chat) {
-                                if !token.is_empty() && !chat.is_empty() {
-                                    crate::commands::cmd_notify_set(
-                                        None, None, None, None, None, None,
-                                        Some(token), Some(chat), None, None, None, None, None,
-                                    )?;
-                                    println!("  {} Telegram notifications configured!", "✓".green());
-                                }
-                            }
-                        } else if selected.starts_with("Gotify") {
-                            let server = Text::new("Enter your Gotify server URL:")
-                                .prompt();
-                            let token = Password::new("Enter your Gotify app token:")
-                                .without_confirmation()
-                                .prompt();
-                            if let (Ok(server), Ok(token)) = (server, token) {
-                                if !server.is_empty() && !token.is_empty() {
-                                    crate::commands::cmd_notify_set(
-                                        None, None, None, Some(server), Some(token), None,
-                                        None, None, None, None, None, None, None,
-                                    )?;
-                                    println!("  {} Gotify notifications configured!", "✓".green());
-                                }
-                            }
-                        } else if selected.starts_with("Pushover") {
-                            let user = Password::new("Enter your Pushover user key:")
-                                .without_confirmation()
-                                .prompt();
-                            let token = Password::new("Enter your Pushover API token:")
-                                .without_confirmation()
-                                .prompt();
-                            if let (Ok(user), Ok(token)) = (user, token) {
-                                if !user.is_empty() && !token.is_empty() {
-                                    crate::commands::cmd_notify_set(
-                                        None, None, None, None, None, None,
-                                        None, None, Some(user), Some(token), None, None, None,
-                                    )?;
-                                    println!("  {} Pushover notifications configured!", "✓".green());
-                                }
-                            }
-                        } else if selected.starts_with("Matrix") {
-                            let server = Text::new("Enter your Matrix homeserver URL:")
-                                .prompt();
-                            let room = Text::new("Enter your Matrix room ID:")
-                                .prompt();
-                            let token = Password::new("Enter your Matrix access token:")
-                                .without_confirmation()
-                                .prompt();
-                            if let (Ok(server), Ok(room), Ok(token)) = (server, room, token) {
-                                if !server.is_empty() && !room.is_empty() && !token.is_empty() {
-                                    crate::commands::cmd_notify_set(
-                                        None, None, None, None, None, None,
-                                        None, None, None, None, Some(server), Some(room), Some(token),
-                                    )?;
-                                    println!("  {} Matrix notifications configured!", "✓".green());
-                                }
-                            }
-                        } else {
-                            println!("  Skipping notification setup.");
-                            println!("  You can configure notifications later with: kto notify set");
+        match choice {
+            Ok(selected) => {
+                if selected.starts_with("ntfy") {
+                    let topic = Text::new("Enter your ntfy topic (e.g., my-alerts):")
+                        .prompt();
+                    if let Ok(topic) = topic {
+                        if !topic.is_empty() {
+                            crate::commands::cmd_notify_set(
+                                Some(topic), None, None, None, None, None,
+                                None, None, None, None, None, None, None,
+                            )?;
+                            println!("  {} ntfy notifications configured!", "✓".green());
                         }
                     }
-                    Err(_) => {
-                        println!("  Skipping notification setup.");
+                } else if selected.starts_with("Slack") {
+                    let webhook = Password::new("Enter your Slack webhook URL:")
+                        .without_confirmation()
+                        .prompt();
+                    if let Ok(webhook) = webhook {
+                        if !webhook.is_empty() {
+                            crate::commands::cmd_notify_set(
+                                None, Some(webhook), None, None, None, None,
+                                None, None, None, None, None, None, None,
+                            )?;
+                            println!("  {} Slack notifications configured!", "✓".green());
+                        }
                     }
+                } else if selected.starts_with("Discord") {
+                    let webhook = Password::new("Enter your Discord webhook URL:")
+                        .without_confirmation()
+                        .prompt();
+                    if let Ok(webhook) = webhook {
+                        if !webhook.is_empty() {
+                            crate::commands::cmd_notify_set(
+                                None, None, Some(webhook), None, None, None,
+                                None, None, None, None, None, None, None,
+                            )?;
+                            println!("  {} Discord notifications configured!", "✓".green());
+                        }
+                    }
+                } else if selected.starts_with("Telegram") {
+                    let token = Password::new("Enter your Telegram bot token:")
+                        .without_confirmation()
+                        .prompt();
+                    let chat = Text::new("Enter your Telegram chat ID:")
+                        .prompt();
+                    if let (Ok(token), Ok(chat)) = (token, chat) {
+                        if !token.is_empty() && !chat.is_empty() {
+                            crate::commands::cmd_notify_set(
+                                None, None, None, None, None, None,
+                                Some(token), Some(chat), None, None, None, None, None,
+                            )?;
+                            println!("  {} Telegram notifications configured!", "✓".green());
+                        }
+                    }
+                } else if selected.starts_with("Gotify") {
+                    let server = Text::new("Enter your Gotify server URL:")
+                        .prompt();
+                    let token = Password::new("Enter your Gotify app token:")
+                        .without_confirmation()
+                        .prompt();
+                    if let (Ok(server), Ok(token)) = (server, token) {
+                        if !server.is_empty() && !token.is_empty() {
+                            crate::commands::cmd_notify_set(
+                                None, None, None, Some(server), Some(token), None,
+                                None, None, None, None, None, None, None,
+                            )?;
+                            println!("  {} Gotify notifications configured!", "✓".green());
+                        }
+                    }
+                } else if selected.starts_with("Pushover") {
+                    let user = Password::new("Enter your Pushover user key:")
+                        .without_confirmation()
+                        .prompt();
+                    let token = Password::new("Enter your Pushover API token:")
+                        .without_confirmation()
+                        .prompt();
+                    if let (Ok(user), Ok(token)) = (user, token) {
+                        if !user.is_empty() && !token.is_empty() {
+                            crate::commands::cmd_notify_set(
+                                None, None, None, None, None, None,
+                                None, None, Some(user), Some(token), None, None, None,
+                            )?;
+                            println!("  {} Pushover notifications configured!", "✓".green());
+                        }
+                    }
+                } else if selected.starts_with("Matrix") {
+                    let server = Text::new("Enter your Matrix homeserver URL:")
+                        .prompt();
+                    let room = Text::new("Enter your Matrix room ID:")
+                        .prompt();
+                    let token = Password::new("Enter your Matrix access token:")
+                        .without_confirmation()
+                        .prompt();
+                    if let (Ok(server), Ok(room), Ok(token)) = (server, room, token) {
+                        if !server.is_empty() && !room.is_empty() && !token.is_empty() {
+                            crate::commands::cmd_notify_set(
+                                None, None, None, None, None, None,
+                                None, None, None, None, Some(server), Some(room), Some(token),
+                            )?;
+                            println!("  {} Matrix notifications configured!", "✓".green());
+                        }
+                    }
+                } else {
+                    println!("  Skipping notification setup.");
                 }
             }
-            Ok(false) | Err(_) => {
+            Err(_) => {
                 println!("  Skipping notification setup.");
-                println!("  You can configure notifications later with: kto notify set");
             }
+        }
+    } else {
+        if config.default_notify.is_some() {
+            println!("  Keeping current notification settings.");
+        } else {
+            println!("  Skipping notification setup.");
+            println!("  You can configure notifications later with: kto notify set");
         }
     }
 
@@ -685,7 +690,7 @@ pub fn cmd_init() -> Result<()> {
                             false, false, false,
                             claude_available, // Enable AI if available
                             None, None, false,
-                            vec![], false, false,
+                            vec![], false, false, false,
                         )?;
                     }
                 }
@@ -713,6 +718,91 @@ pub fn cmd_init() -> Result<()> {
             println!("  Skipping service installation.");
             println!("  You can install the service later with: kto service install");
         }
+    }
+
+    // Step 5: Shell completions
+    println!("\n{}", "Step 5: Shell completions".bold());
+
+    // Detect shell from SHELL env var
+    let shell_path = std::env::var("SHELL").unwrap_or_default();
+    let detected_shell = if shell_path.contains("zsh") {
+        Some(("zsh", "~/.zshrc"))
+    } else if shell_path.contains("bash") {
+        Some(("bash", "~/.bashrc"))
+    } else if shell_path.contains("fish") {
+        Some(("fish", "~/.config/fish/completions/kto.fish"))
+    } else {
+        None
+    };
+
+    if let Some((shell_name, config_path)) = detected_shell {
+        println!("  Detected shell: {}", shell_name);
+
+        let install_completions = Confirm::new(&format!("Add tab completions to {}?", config_path))
+            .with_default(true)
+            .prompt();
+
+        match install_completions {
+            Ok(true) => {
+                let home = std::env::var("HOME").unwrap_or_default();
+                let full_path = config_path.replace("~", &home);
+
+                // For fish, we need to create the directory and write the file directly
+                if shell_name == "fish" {
+                    let fish_dir = format!("{}/.config/fish/completions", home);
+                    if let Err(e) = std::fs::create_dir_all(&fish_dir) {
+                        println!("  {}: Could not create fish completions directory: {}", "Warning".yellow(), e);
+                    } else {
+                        // Generate completions directly to file
+                        let fish_path = format!("{}/kto.fish", fish_dir);
+                        match std::fs::File::create(&fish_path) {
+                            Ok(mut file) => {
+                                let mut cmd = Cli::command();
+                                clap_complete::generate(Shell::Fish, &mut cmd, "kto", &mut file);
+                                println!("  {} Completions written to {}", "✓".green(), fish_path);
+                            }
+                            Err(e) => {
+                                println!("  {}: Could not write completions: {}", "Warning".yellow(), e);
+                            }
+                        }
+                    }
+                } else {
+                    // For bash/zsh, append eval to rc file
+                    let completion_line = format!("\n# kto shell completions\neval \"$(kto completions {})\"\n", shell_name);
+
+                    // Check if already installed
+                    let existing = std::fs::read_to_string(&full_path).unwrap_or_default();
+                    if existing.contains("kto completions") {
+                        println!("  Completions already configured in {}", config_path);
+                    } else {
+                        match std::fs::OpenOptions::new().append(true).open(&full_path) {
+                            Ok(mut file) => {
+                                use std::io::Write;
+                                if let Err(e) = file.write_all(completion_line.as_bytes()) {
+                                    println!("  {}: Could not write to {}: {}", "Warning".yellow(), config_path, e);
+                                } else {
+                                    println!("  {} Completions added to {}", "✓".green(), config_path);
+                                    println!("  Run `source {}` or restart your shell to activate", config_path);
+                                }
+                            }
+                            Err(e) => {
+                                println!("  {}: Could not open {}: {}", "Warning".yellow(), config_path, e);
+                                println!("  You can manually add: eval \"$(kto completions {})\"", shell_name);
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(false) | Err(_) => {
+                println!("  Skipping completions setup.");
+                println!("  You can add them later with: kto completions {}", shell_name);
+            }
+        }
+    } else {
+        println!("  Could not detect shell. You can manually set up completions:");
+        println!("    kto completions bash >> ~/.bashrc");
+        println!("    kto completions zsh >> ~/.zshrc");
+        println!("    kto completions fish > ~/.config/fish/completions/kto.fish");
     }
 
     // Done

@@ -320,6 +320,39 @@ impl Database {
         }
     }
 
+    /// Get the most recent snapshot across all watches (for daemon health check)
+    pub fn get_most_recent_snapshot(&self) -> Result<Option<Snapshot>> {
+        let row = self.conn.query_row(
+            "SELECT id, watch_id, fetched_at, raw_html, extracted, content_hash
+             FROM snapshots ORDER BY fetched_at DESC LIMIT 1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Option<Vec<u8>>>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            },
+        ).optional()?;
+
+        match row {
+            Some((id, watch_id, fetched_at, raw_html, extracted, content_hash)) => {
+                Ok(Some(Snapshot {
+                    id: Uuid::parse_str(&id).unwrap_or_else(|_| Uuid::new_v4()),
+                    watch_id: Uuid::parse_str(&watch_id).unwrap_or_else(|_| Uuid::new_v4()),
+                    fetched_at: timestamp_to_datetime(fetched_at),
+                    raw_html,
+                    extracted,
+                    content_hash,
+                }))
+            }
+            None => Ok(None),
+        }
+    }
+
     /// Clean up old snapshots (keep last N extracted, last M with raw_html)
     pub fn cleanup_snapshots(&self, watch_id: &Uuid, keep_extracted: usize, keep_raw: usize) -> Result<()> {
         // Remove raw_html from older snapshots

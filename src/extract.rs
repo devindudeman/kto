@@ -428,6 +428,33 @@ pub fn extract_title(html: &str) -> Option<String> {
         .map(|el| el.text().collect::<Vec<_>>().join(""))
 }
 
+/// Extract raw JSON-LD data from HTML as a string (for research context)
+/// Returns the raw JSON-LD content, not formatted for display
+pub fn extract_raw_jsonld(html: &str) -> Option<String> {
+    let document = Html::parse_document(html);
+    let jsonld_selector = Selector::parse(r#"script[type="application/ld+json"]"#).ok()?;
+
+    let mut all_jsonld = Vec::new();
+
+    for script in document.select(&jsonld_selector) {
+        let text: String = script.text().collect();
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+            all_jsonld.push(json);
+        }
+    }
+
+    if all_jsonld.is_empty() {
+        return None;
+    }
+
+    // Return as formatted JSON string
+    if all_jsonld.len() == 1 {
+        serde_json::to_string_pretty(&all_jsonld[0]).ok()
+    } else {
+        serde_json::to_string_pretty(&all_jsonld).ok()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -662,5 +689,27 @@ mod tests {
         assert!(result.contains("... and 2 more offers"));
         // Should NOT have Offer 6 or 7
         assert!(!result.contains("Offer 6:"));
+    }
+
+    #[test]
+    fn test_extract_raw_jsonld() {
+        let html = r#"
+            <html><head>
+            <script type="application/ld+json">
+            {"@type": "Product", "name": "Test Product", "sku": "12345"}
+            </script>
+            </head><body></body></html>
+        "#;
+        let result = extract_raw_jsonld(html).unwrap();
+        assert!(result.contains("\"@type\": \"Product\""));
+        assert!(result.contains("\"name\": \"Test Product\""));
+        assert!(result.contains("\"sku\": \"12345\""));
+    }
+
+    #[test]
+    fn test_extract_raw_jsonld_none() {
+        let html = r#"<html><head></head><body></body></html>"#;
+        let result = extract_raw_jsonld(html);
+        assert!(result.is_none());
     }
 }

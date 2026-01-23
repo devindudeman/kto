@@ -3,6 +3,7 @@
 mod check;
 mod misc;
 mod notify;
+pub(crate) mod platform_detect;
 mod profile;
 mod remind;
 mod service;

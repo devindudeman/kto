@@ -99,6 +99,7 @@ pub fn ui(f: &mut Frame, app: &mut App) {
         Mode::FilterEdit => render_filter_edit(f, app),
         Mode::MemoryInspector => render_memory_inspector(f, app),
         Mode::ProfileInspector => render_profile_inspector(f, app),
+        Mode::Health => render_health_dashboard(f, app),
         Mode::Normal | Mode::Search => {}
     }
 }
@@ -109,36 +110,7 @@ fn render_watches(f: &mut Frame, app: &mut App, area: Rect) {
     let filter_empty = app.filter_text.is_empty();
 
     if is_empty && filter_empty {
-        let border_style = if app.focus == Pane::Watches {
-            Style::default().fg(Color::Cyan)
-        } else {
-            Style::default()
-        };
-
-        let text = vec![
-            Line::from(""),
-            Line::from(vec![
-                Span::styled("  No watches yet", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-            ]),
-            Line::from(""),
-            Line::from("  Get started:"),
-            Line::from(vec![
-                Span::styled("    n", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-                Span::raw("  Create new watch"),
-            ]),
-            Line::from(vec![
-                Span::styled("    ?", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-                Span::raw("  Show all keybindings"),
-            ]),
-        ];
-
-        let paragraph = Paragraph::new(text)
-            .block(Block::default()
-                .borders(Borders::ALL)
-                .title(" Watches ")
-                .border_style(border_style));
-
-        f.render_widget(paragraph, area);
+        render_empty_watches_state(f, app, area);
         return;
     }
 
@@ -162,12 +134,22 @@ fn render_watches(f: &mut Frame, app: &mut App, area: Rect) {
         .map(|(i, watch)| {
             let has_error = app.watch_errors.contains_key(&watch.id);
 
+            // Check if watch is stale (no check in 2x interval)
+            let is_stale = is_watch_stale(&app.db, watch);
+
+            // Determine status indicator
+            // ● = active, checked recently
+            // ◐ = active but stale (no check in 2x interval)
+            // ○ = paused
+            // ✗ = error
             let (status, status_color) = if has_error {
                 ("✗", Color::Red)
-            } else if watch.enabled {
-                ("●", Color::Green)
-            } else {
+            } else if !watch.enabled {
                 ("○", Color::Yellow)
+            } else if is_stale {
+                ("◐", Color::Yellow)
+            } else {
+                ("●", Color::Green)
             };
 
             let engine_badge = match watch.engine {
@@ -539,10 +521,13 @@ fn render_details(f: &mut Frame, app: &mut App, area: Rect) {
     f.render_widget(changes_widget, changes_area);
 }
 
-fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
+fn render_status_bar(f: &mut Frame, app: &mut App, area: Rect) {
     let active_watches = app.watches.iter().filter(|w| w.enabled).count();
     let ai_watches = app.watches.iter().filter(|w| w.agent_config.as_ref().map(|c| c.enabled).unwrap_or(false)).count();
     let active_reminders = app.reminders.iter().filter(|r| r.enabled).count();
+
+    // Check if daemon is running
+    let daemon_status = get_daemon_status(&app.db);
 
     let (status, help_hint) = match &app.mode {
         Mode::Search => (format!("/{}", app.filter_text), "<Enter> apply  <Esc> cancel".to_string()),
@@ -556,12 +541,13 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
                     Pane::Reminders => format!("{} reminders ({} active)", app.reminders.len(), active_reminders),
                 }
             };
-            let hint = match app.focus {
-                Pane::Watches => "<n> new  <D> describe  <e> edit  </> filter  <?> help",
-                Pane::Changes => "<Enter> view diff  <j/k> navigate  <?> help",
-                Pane::Reminders => "<n> new  <e> edit  <p> pause  <d> delete  <?> help",
+
+            let base_hint = match app.focus {
+                Pane::Watches => "<n> new  <H> health  <?> help",
+                Pane::Changes => "<Enter> view  <H> health  <?> help",
+                Pane::Reminders => "<n> new  <H> health  <?> help",
             };
-            (status, hint.to_string())
+            (status, base_hint.to_string())
         }
         Mode::ViewChange => {
             let watch_name = app.selected_watch().map(|w| w.name.as_str()).unwrap_or("?");
@@ -573,12 +559,40 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
         }
         Mode::Logs => (format!("Activity Log ({} entries)", app.all_changes.len()), "<j/k> navigate  <Esc> close".to_string()),
         Mode::NotifySetup => ("Notification Setup".to_string(), "<Tab> switch  <Enter> save  <Esc> cancel".to_string()),
+        Mode::Health => ("System Health".to_string(), "<Esc> close  <r> refresh".to_string()),
         _ => (String::new(), String::new())
+    };
+
+    // Build the status line with daemon status indicator
+    let daemon_indicator = match &daemon_status {
+        DaemonStatus::Running(info) => {
+            Span::styled(
+                format!(" {} {} ", "●", info),
+                Style::default().fg(Color::Green)
+            )
+        }
+        DaemonStatus::Stale(info) => {
+            Span::styled(
+                format!(" {} {} ", "◐", info),
+                Style::default().fg(Color::Yellow)
+            )
+        }
+        DaemonStatus::Stopped => {
+            Span::styled(
+                " ○ daemon stopped ",
+                Style::default().fg(Color::Red)
+            )
+        }
     };
 
     let status_line = Line::from(vec![
         Span::styled(format!(" {} ", status), Style::default().fg(Color::Cyan)),
-        Span::raw(" ".repeat(area.width.saturating_sub(status.len() as u16 + help_hint.len() as u16 + 4) as usize)),
+        Span::styled(" │ ", Style::default().fg(Color::DarkGray)),
+        daemon_indicator,
+        Span::raw(" ".repeat(
+            area.width
+                .saturating_sub(status.len() as u16 + help_hint.len() as u16 + 25) as usize
+        )),
         Span::styled(&help_hint, Style::default().fg(Color::DarkGray)),
         Span::raw(" "),
     ]);
@@ -587,8 +601,42 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(status_bar, area);
 }
 
+/// Daemon status for display
+enum DaemonStatus {
+    Running(String),  // e.g., "last check 2m ago"
+    Stale(String),    // e.g., "last check 2h ago"
+    Stopped,
+}
+
+/// Check if daemon is running and get last check info
+fn get_daemon_status(db: &crate::db::Database) -> DaemonStatus {
+    // Try to find when the last check occurred by looking at snapshots
+    if let Ok(Some(last_snapshot)) = db.get_most_recent_snapshot() {
+        let ago = chrono::Utc::now().signed_duration_since(last_snapshot.fetched_at);
+        let ago_str = if ago.num_seconds() < 60 {
+            format!("{}s ago", ago.num_seconds())
+        } else if ago.num_minutes() < 60 {
+            format!("{}m ago", ago.num_minutes())
+        } else if ago.num_hours() < 24 {
+            format!("{}h ago", ago.num_hours())
+        } else {
+            format!("{}d ago", ago.num_days())
+        };
+
+        // Consider "stale" if no check in last 30 minutes
+        if ago.num_minutes() > 30 {
+            DaemonStatus::Stale(format!("last: {}", ago_str))
+        } else {
+            DaemonStatus::Running(format!("last: {}", ago_str))
+        }
+    } else {
+        DaemonStatus::Stopped
+    }
+}
+
+
 fn render_help(f: &mut Frame) {
-    let area = centered_rect(55, 80, f.area());
+    let area = centered_rect(58, 85, f.area());
     f.render_widget(Clear, area);
 
     let help_text = vec![
@@ -600,7 +648,7 @@ fn render_help(f: &mut Frame) {
         Line::from(vec![Span::styled(" /       ", Style::default().fg(Color::Yellow)), Span::raw("Filter watches")]),
         Line::from(""),
         Line::from(Span::styled(" Watches", Style::default().add_modifier(Modifier::BOLD))),
-        Line::from(vec![Span::styled(" n       ", Style::default().fg(Color::Yellow)), Span::raw("New watch (wizard)")]),
+        Line::from(vec![Span::styled(" n       ", Style::default().fg(Color::Yellow)), Span::raw("New watch (with templates)")]),
         Line::from(vec![Span::styled(" D       ", Style::default().fg(Color::Yellow)), Span::raw("Describe (view config)")]),
         Line::from(vec![Span::styled(" e       ", Style::default().fg(Color::Yellow)), Span::raw("Edit watch")]),
         Line::from(vec![Span::styled(" p       ", Style::default().fg(Color::Yellow)), Span::raw("Pause/Resume")]),
@@ -614,11 +662,24 @@ fn render_help(f: &mut Frame) {
         Line::from(vec![Span::styled(" T       ", Style::default().fg(Color::Yellow)), Span::raw("Test notification")]),
         Line::from(""),
         Line::from(Span::styled(" Global", Style::default().add_modifier(Modifier::BOLD))),
+        Line::from(vec![Span::styled(" H       ", Style::default().fg(Color::Yellow)), Span::raw("Health dashboard")]),
         Line::from(vec![Span::styled(" L       ", Style::default().fg(Color::Yellow)), Span::raw("Activity logs")]),
         Line::from(vec![Span::styled(" N       ", Style::default().fg(Color::Yellow)), Span::raw("Notification setup")]),
         Line::from(vec![Span::styled(" P       ", Style::default().fg(Color::Yellow)), Span::raw("View profile")]),
         Line::from(vec![Span::styled(" r       ", Style::default().fg(Color::Yellow)), Span::raw("Refresh")]),
         Line::from(vec![Span::styled(" q       ", Style::default().fg(Color::Yellow)), Span::raw("Quit")]),
+        Line::from(""),
+        Line::from(Span::styled(" Status Indicators", Style::default().add_modifier(Modifier::BOLD))),
+        Line::from(vec![
+            Span::styled(" ●  ", Style::default().fg(Color::Green)),
+            Span::raw("healthy   "),
+            Span::styled("◐  ", Style::default().fg(Color::Yellow)),
+            Span::raw("stale   "),
+            Span::styled("○  ", Style::default().fg(Color::Yellow)),
+            Span::raw("paused   "),
+            Span::styled("✗  ", Style::default().fg(Color::Red)),
+            Span::raw("error"),
+        ]),
         Line::from(""),
         Line::from(Span::styled(" Press any key to close ", Style::default().fg(Color::DarkGray))),
     ];
@@ -630,7 +691,7 @@ fn render_help(f: &mut Frame) {
 }
 
 fn render_wizard(f: &mut Frame, app: &App) {
-    let area = centered_rect(70, 60, f.area());
+    let area = centered_rect(70, 65, f.area());
     f.render_widget(Clear, area);
 
     if let Some(ref wizard) = app.wizard_state {
@@ -640,25 +701,77 @@ fn render_wizard(f: &mut Frame, app: &App) {
         lines.push(Line::from(""));
 
         let step_num = match wizard.step {
-            WizardStep::Url => 1,
-            WizardStep::Engine => 2,
-            WizardStep::Name => 3,
-            WizardStep::Extraction => 4,
-            WizardStep::Interval => 5,
-            WizardStep::Agent => 6,
-            WizardStep::Review => 7,
+            WizardStep::Template => 1,
+            WizardStep::Url => 2,
+            WizardStep::Engine => 3,
+            WizardStep::Name => 4,
+            WizardStep::Extraction => 5,
+            WizardStep::Interval => 6,
+            WizardStep::Agent => 7,
+            WizardStep::Review => 8,
         };
-        lines.push(Line::from(Span::styled(format!(" Step {} of 7 ", step_num), Style::default().fg(Color::DarkGray))));
+        lines.push(Line::from(Span::styled(format!(" Step {} of 8 ", step_num), Style::default().fg(Color::DarkGray))));
         lines.push(Line::from(""));
 
         match wizard.step {
+            WizardStep::Template => {
+                lines.push(Line::from(Span::styled(" Choose a template:", Style::default().fg(Color::Yellow))));
+                lines.push(Line::from(""));
+
+                for template in WatchTemplate::all() {
+                    let is_selected = template == wizard.template;
+                    let marker = if is_selected { ">" } else { " " };
+                    let marker_style = if is_selected {
+                        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    };
+                    let name_style = if is_selected {
+                        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default()
+                    };
+
+                    lines.push(Line::from(vec![
+                        Span::styled(format!(" {} ", marker), marker_style),
+                        Span::styled(template.name(), name_style),
+                    ]));
+                    lines.push(Line::from(vec![
+                        Span::raw("     "),
+                        Span::styled(template.description(), Style::default().fg(Color::DarkGray)),
+                    ]));
+                }
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(" j/k: navigate  Space: select  Tab: continue ", Style::default().fg(Color::DarkGray))));
+            }
             WizardStep::Url => {
                 lines.push(Line::from(Span::styled(" URL to watch:", Style::default().fg(Color::Yellow))));
                 lines.push(Line::from(Span::raw(format!(" > {}_", wizard.url))));
             }
             WizardStep::Engine => {
-                lines.push(Line::from(Span::styled(" Fetch engine (space to cycle):", Style::default().fg(Color::Yellow))));
-                lines.push(Line::from(Span::raw(format!(" > {:?}", wizard.engine))));
+                // Show transform suggestion if detected
+                if let Some(ref suggestion) = wizard.transform_suggestion {
+                    lines.push(Line::from(Span::styled(" Feed URL detected:", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))));
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(vec![
+                        Span::styled("   ", Style::default()),
+                        Span::styled(suggestion.description, Style::default().fg(Color::Cyan)),
+                    ]));
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(vec![
+                        Span::styled("   URL: ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(&suggestion.transformed_url, Style::default().fg(Color::Green)),
+                    ]));
+                    lines.push(Line::from(vec![
+                        Span::styled("   Engine: ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(format!("{:?}", suggestion.engine), Style::default()),
+                    ]));
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(Span::styled(" Tab: accept  x: use original URL instead", Style::default().fg(Color::DarkGray))));
+                } else {
+                    lines.push(Line::from(Span::styled(" Fetch engine (space to cycle):", Style::default().fg(Color::Yellow))));
+                    lines.push(Line::from(Span::raw(format!(" > {:?}", wizard.engine))));
+                }
             }
             WizardStep::Name => {
                 lines.push(Line::from(Span::styled(" Watch name:", Style::default().fg(Color::Yellow))));
@@ -680,6 +793,14 @@ fn render_wizard(f: &mut Frame, app: &App) {
             WizardStep::Review => {
                 lines.push(Line::from(Span::styled(" Review:", Style::default().add_modifier(Modifier::BOLD))));
                 lines.push(Line::from(""));
+
+                // Show template if not custom
+                if wizard.template != WatchTemplate::Custom {
+                    lines.push(Line::from(vec![
+                        Span::styled("  Template: ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(wizard.template.name(), Style::default().fg(Color::Cyan)),
+                    ]));
+                }
 
                 // URL (truncated if needed)
                 let max_url_len = (area.width as usize).saturating_sub(12);
@@ -747,8 +868,30 @@ fn render_wizard(f: &mut Frame, app: &App) {
                     },
                 ]));
 
+                // Show test result if available
+                if let Some(ref result) = wizard.test_result {
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(Span::styled(" Test Result:", Style::default().fg(Color::Yellow))));
+                    // Truncate result to fit
+                    let max_len = (area.width as usize).saturating_sub(6);
+                    let result_preview = if result.len() > max_len {
+                        format!("{}...", &result[..max_len.saturating_sub(3)])
+                    } else {
+                        result.clone()
+                    };
+                    lines.push(Line::from(Span::styled(
+                        format!("  {}", result_preview),
+                        Style::default().fg(Color::DarkGray)
+                    )));
+                }
+
                 lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled(" Press Enter to create ", Style::default().fg(Color::Green))));
+                lines.push(Line::from(vec![
+                    Span::styled(" Enter ", Style::default().fg(Color::Green)),
+                    Span::raw("Create  "),
+                    Span::styled(" t ", Style::default().fg(Color::Yellow)),
+                    Span::raw("Test extraction first"),
+                ]));
             }
         }
 
@@ -2143,4 +2286,241 @@ fn describe_notify_target(target: &crate::config::NotifyTarget) -> String {
             format!("Email ({} -> {} via {})", from, to, smtp_server)
         }
     }
+}
+
+/// Check if a watch is stale (no check in 2x its interval)
+fn is_watch_stale(db: &crate::db::Database, watch: &crate::watch::Watch) -> bool {
+    if !watch.enabled {
+        return false;
+    }
+
+    if let Ok(Some(snapshot)) = db.get_latest_snapshot(&watch.id) {
+        let ago = chrono::Utc::now().signed_duration_since(snapshot.fetched_at);
+        let stale_threshold = (watch.interval_secs * 2) as i64;
+        ago.num_seconds() > stale_threshold
+    } else {
+        // No snapshot yet - consider stale if watch was created more than 2x interval ago
+        let ago = chrono::Utc::now().signed_duration_since(watch.created_at);
+        let stale_threshold = (watch.interval_secs * 2) as i64;
+        ago.num_seconds() > stale_threshold
+    }
+}
+
+/// Render enhanced empty state for watches pane
+fn render_empty_watches_state(f: &mut Frame, app: &App, area: Rect) {
+    let border_style = if app.focus == Pane::Watches {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default()
+    };
+
+    let text = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            "  Welcome to kto!",
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  Let's set up your first watch.",
+            Style::default().fg(Color::Yellow)
+        )),
+        Line::from(""),
+        Line::from("  Quick Start:"),
+        Line::from(vec![
+            Span::styled("    n", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::raw("  Create new watch (with templates)"),
+        ]),
+        Line::from(vec![
+            Span::styled("    N", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::raw("  Set up notifications first"),
+        ]),
+        Line::from(vec![
+            Span::styled("    ?", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::raw("  View all keybindings"),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  Available templates:",
+            Style::default().fg(Color::DarkGray)
+        )),
+        Line::from(Span::styled(
+            "    - Price Drop Monitor",
+            Style::default().fg(Color::DarkGray)
+        )),
+        Line::from(Span::styled(
+            "    - Back-in-Stock Alert",
+            Style::default().fg(Color::DarkGray)
+        )),
+        Line::from(Span::styled(
+            "    - Job Posting Tracker",
+            Style::default().fg(Color::DarkGray)
+        )),
+        Line::from(Span::styled(
+            "    - Changelog Watcher",
+            Style::default().fg(Color::DarkGray)
+        )),
+    ];
+
+    let paragraph = Paragraph::new(text)
+        .block(Block::default()
+            .borders(Borders::ALL)
+            .title(" Watches ")
+            .border_style(border_style));
+
+    f.render_widget(paragraph, area);
+}
+
+/// Render the health dashboard
+fn render_health_dashboard(f: &mut Frame, app: &App) {
+    let area = centered_rect(70, 60, f.area());
+    f.render_widget(Clear, area);
+
+    // Gather health data
+    let daemon_status = get_daemon_status(&app.db);
+    let total_watches = app.watches.len();
+    let active_watches = app.watches.iter().filter(|w| w.enabled).count();
+    let ai_watches = app.watches.iter().filter(|w| w.agent_config.as_ref().map(|c| c.enabled).unwrap_or(false)).count();
+    let error_watches = app.watch_errors.len();
+    let stale_watches = app.watches.iter().filter(|w| is_watch_stale(&app.db, w)).count();
+    let healthy_watches = active_watches.saturating_sub(error_watches).saturating_sub(stale_watches);
+
+    // Get notification config
+    let config = crate::config::Config::load().unwrap_or_default();
+    let notify_status = if let Some(ref target) = config.default_notify {
+        describe_notify_target(target)
+    } else {
+        "Not configured".to_string()
+    };
+
+    let mut lines = Vec::new();
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        " System Health Dashboard",
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+    )));
+    lines.push(Line::from(""));
+
+    // Daemon status
+    lines.push(Line::from(Span::styled(" Daemon:", Style::default().fg(Color::Yellow))));
+    match &daemon_status {
+        DaemonStatus::Running(info) => {
+            lines.push(Line::from(vec![
+                Span::styled("   ● Running ", Style::default().fg(Color::Green)),
+                Span::styled(format!("({})", info), Style::default().fg(Color::DarkGray)),
+            ]));
+        }
+        DaemonStatus::Stale(info) => {
+            lines.push(Line::from(vec![
+                Span::styled("   ◐ Stale ", Style::default().fg(Color::Yellow)),
+                Span::styled(format!("({})", info), Style::default().fg(Color::DarkGray)),
+            ]));
+            lines.push(Line::from(Span::styled(
+                "   Consider running: kto daemon",
+                Style::default().fg(Color::DarkGray)
+            )));
+        }
+        DaemonStatus::Stopped => {
+            lines.push(Line::from(vec![
+                Span::styled("   ○ Not running", Style::default().fg(Color::Red)),
+            ]));
+            lines.push(Line::from(Span::styled(
+                "   Start with: kto daemon &",
+                Style::default().fg(Color::DarkGray)
+            )));
+        }
+    }
+    lines.push(Line::from(""));
+
+    // Watch stats
+    lines.push(Line::from(Span::styled(" Watches:", Style::default().fg(Color::Yellow))));
+    lines.push(Line::from(vec![
+        Span::styled("   Total: ", Style::default().fg(Color::DarkGray)),
+        Span::raw(format!("{}", total_watches)),
+    ]));
+
+    if healthy_watches > 0 {
+        lines.push(Line::from(vec![
+            Span::styled("   ● ", Style::default().fg(Color::Green)),
+            Span::raw(format!("{} healthy", healthy_watches)),
+        ]));
+    }
+
+    if stale_watches > 0 {
+        lines.push(Line::from(vec![
+            Span::styled("   ◐ ", Style::default().fg(Color::Yellow)),
+            Span::raw(format!("{} stale (not checked in 2x interval)", stale_watches)),
+        ]));
+    }
+
+    if error_watches > 0 {
+        lines.push(Line::from(vec![
+            Span::styled("   ✗ ", Style::default().fg(Color::Red)),
+            Span::raw(format!("{} with errors", error_watches)),
+        ]));
+    }
+
+    if ai_watches > 0 {
+        lines.push(Line::from(vec![
+            Span::styled("   AI: ", Style::default().fg(Color::Cyan)),
+            Span::raw(format!("{} with AI agent enabled", ai_watches)),
+        ]));
+    }
+
+    let paused = total_watches - active_watches;
+    if paused > 0 {
+        lines.push(Line::from(vec![
+            Span::styled("   ○ ", Style::default().fg(Color::Yellow)),
+            Span::raw(format!("{} paused", paused)),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+
+    // Notifications
+    lines.push(Line::from(Span::styled(" Notifications:", Style::default().fg(Color::Yellow))));
+    lines.push(Line::from(vec![
+        Span::styled("   Target: ", Style::default().fg(Color::DarkGray)),
+        Span::raw(&notify_status),
+    ]));
+
+    // Quiet hours
+    if let Some(ref quiet) = config.quiet_hours {
+        lines.push(Line::from(vec![
+            Span::styled("   Quiet hours: ", Style::default().fg(Color::DarkGray)),
+            Span::raw(format!("{} - {}", quiet.start, quiet.end)),
+        ]));
+        if quiet.is_quiet_now() {
+            lines.push(Line::from(Span::styled(
+                "   (Currently in quiet hours)",
+                Style::default().fg(Color::Yellow)
+            )));
+        }
+    }
+
+    lines.push(Line::from(""));
+
+    // Status indicator legend
+    lines.push(Line::from(Span::styled(" Status Indicators:", Style::default().fg(Color::DarkGray))));
+    lines.push(Line::from(vec![
+        Span::styled("   ● ", Style::default().fg(Color::Green)),
+        Span::styled("healthy  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("◐ ", Style::default().fg(Color::Yellow)),
+        Span::styled("stale  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("○ ", Style::default().fg(Color::Yellow)),
+        Span::styled("paused  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("✗ ", Style::default().fg(Color::Red)),
+        Span::styled("error", Style::default().fg(Color::DarkGray)),
+    ]));
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        " Esc close  r refresh  L view logs ",
+        Style::default().fg(Color::DarkGray)
+    )));
+
+    let widget = Paragraph::new(lines)
+        .block(Block::default().borders(Borders::ALL).title(" Health Dashboard "))
+        .style(Style::default().bg(Color::Black));
+    f.render_widget(widget, area);
 }

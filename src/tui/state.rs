@@ -3,10 +3,12 @@
 use ratatui::layout::Rect;
 use uuid::Uuid;
 use chrono::Utc;
+use std::time::Instant;
 
 use crate::db::Database;
 use crate::error::Result;
 use crate::interests::{GlobalMemory, InterestProfile};
+use crate::transforms::Intent;
 use crate::watch::{AgentConfig, AgentMemory, Change, Engine, Filter, FilterTarget, Reminder, Snapshot, Watch};
 use crate::fetch::fetch;
 use crate::extract;
@@ -75,6 +77,11 @@ pub struct App {
     pub reminders_scroll: usize,
     pub changes_scroll: usize,
     pub logs_scroll: usize,
+    // Rotating tips state
+    pub tip_index: usize,
+    pub last_tip_change: Instant,
+    // Health dashboard state
+    pub health_dashboard_state: Option<HealthDashboardState>,
 }
 
 impl App {
@@ -123,6 +130,9 @@ impl App {
             reminders_scroll: 0,
             changes_scroll: 0,
             logs_scroll: 0,
+            tip_index: 0,
+            last_tip_change: Instant::now(),
+            health_dashboard_state: None,
         })
     }
 
@@ -921,6 +931,7 @@ impl ProfileInspectorState {
 #[derive(Clone)]
 pub struct WizardState {
     pub step: WizardStep,
+    pub template: WatchTemplate,
     pub url: String,
     pub engine: Engine,  // Fetch engine
     pub name: String,
@@ -930,12 +941,25 @@ pub struct WizardState {
     pub agent_enabled: bool,
     pub agent_instructions: String,
     pub test_result: Option<String>,
+    /// Transform suggestion if detected (e.g., GitHub releases.atom)
+    pub transform_suggestion: Option<TransformSuggestion>,
+}
+
+/// Simplified transform suggestion for TUI wizard
+#[derive(Clone)]
+pub struct TransformSuggestion {
+    pub original_url: String,
+    pub transformed_url: String,
+    pub engine: Engine,
+    pub description: &'static str,
+    pub confidence: f32,
 }
 
 impl WizardState {
     pub fn new() -> Self {
         Self {
-            step: WizardStep::Url,
+            step: WizardStep::Template,
+            template: WatchTemplate::Custom,
             url: String::new(),
             engine: Engine::Http,
             name: String::new(),
@@ -945,11 +969,52 @@ impl WizardState {
             agent_enabled: false,
             agent_instructions: String::new(),
             test_result: None,
+            transform_suggestion: None,
         }
     }
 
-    /// Auto-detect engine from URL patterns
+    /// Apply template settings
+    pub fn apply_template(&mut self) {
+        if let Some(instructions) = self.template.agent_instructions() {
+            self.agent_enabled = true;
+            self.agent_instructions = instructions.to_string();
+        }
+    }
+
+    /// Auto-detect engine from URL patterns and check for URL transforms
     pub fn detect_engine(&mut self) {
+        // First, check for URL transforms based on template intent
+        let intent = self.template.to_intent();
+
+        if intent != Intent::Generic {
+            if let Ok(parsed_url) = url::Url::parse(&self.url) {
+                if let Some(transform_match) = crate::transforms::match_transform(&parsed_url, intent) {
+                    if transform_match.confidence >= 0.8 {
+                        // Store the suggestion - user will see it in engine step
+                        self.transform_suggestion = Some(TransformSuggestion {
+                            original_url: self.url.clone(),
+                            transformed_url: transform_match.url.to_string(),
+                            engine: transform_match.engine.clone(),
+                            description: transform_match.description,
+                            confidence: transform_match.confidence,
+                        });
+
+                        // Pre-fill with transform suggestion
+                        self.url = transform_match.url.to_string();
+                        self.engine = transform_match.engine;
+                        if self.engine == Engine::Rss {
+                            self.extraction = "rss".to_string();
+                        }
+
+                        // Generate a name from the URL
+                        self.name = generate_name_from_transform_url(&transform_match.url);
+                        return;
+                    }
+                }
+            }
+        }
+
+        // Fallback to simple URL pattern detection
         let url_lower = self.url.to_lowercase();
         if url_lower.ends_with(".rss")
             || url_lower.ends_with(".xml")
@@ -964,8 +1029,25 @@ impl WizardState {
         }
     }
 
+    /// Clear transform suggestion (e.g., when user declines it)
+    pub fn clear_transform(&mut self) {
+        if let Some(ref suggestion) = self.transform_suggestion {
+            // Restore original URL
+            self.url = suggestion.original_url.clone();
+            self.engine = Engine::Http;
+            self.extraction = "auto".to_string();
+            self.name.clear();
+        }
+        self.transform_suggestion = None;
+    }
+
     pub fn next_step(&mut self) {
         self.step = match self.step {
+            WizardStep::Template => {
+                // Apply template settings when leaving template step
+                self.apply_template();
+                WizardStep::Url
+            }
             WizardStep::Url => {
                 // Auto-detect RSS when leaving URL step
                 self.detect_engine();
@@ -982,7 +1064,8 @@ impl WizardState {
 
     pub fn prev_step(&mut self) {
         self.step = match self.step {
-            WizardStep::Url => WizardStep::Url,
+            WizardStep::Template => WizardStep::Template,
+            WizardStep::Url => WizardStep::Template,
             WizardStep::Engine => WizardStep::Url,
             WizardStep::Name => WizardStep::Engine,
             WizardStep::Extraction => WizardStep::Name,
@@ -1055,4 +1138,144 @@ impl NotifySetupState {
             step: 0,
         }
     }
+}
+
+// === Health Dashboard State ===
+
+#[derive(Clone)]
+pub struct HealthDashboardState {
+    pub daemon_running: bool,
+    pub daemon_pid: Option<u32>,
+    pub last_check: Option<chrono::DateTime<Utc>>,
+    pub healthy_watches: usize,
+    pub stale_watches: usize,
+    pub error_watches: usize,
+    pub notifications_24h: usize,
+}
+
+impl HealthDashboardState {
+    pub fn new() -> Self {
+        Self {
+            daemon_running: false,
+            daemon_pid: None,
+            last_check: None,
+            healthy_watches: 0,
+            stale_watches: 0,
+            error_watches: 0,
+            notifications_24h: 0,
+        }
+    }
+}
+
+// === Watch Templates ===
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum WatchTemplate {
+    Custom,
+    PriceDrop,
+    BackInStock,
+    JobPostings,
+    Changelog,
+}
+
+impl WatchTemplate {
+    pub fn all() -> Vec<WatchTemplate> {
+        vec![
+            WatchTemplate::Custom,
+            WatchTemplate::PriceDrop,
+            WatchTemplate::BackInStock,
+            WatchTemplate::JobPostings,
+            WatchTemplate::Changelog,
+        ]
+    }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            WatchTemplate::Custom => "Custom (no template)",
+            WatchTemplate::PriceDrop => "Price Drop Monitor",
+            WatchTemplate::BackInStock => "Back-in-Stock Alert",
+            WatchTemplate::JobPostings => "Job Posting Tracker",
+            WatchTemplate::Changelog => "Changelog/Release Watcher",
+        }
+    }
+
+    pub fn description(&self) -> &'static str {
+        match self {
+            WatchTemplate::Custom => "Start from scratch with full control",
+            WatchTemplate::PriceDrop => "Alert when price drops below threshold",
+            WatchTemplate::BackInStock => "Alert when item becomes available",
+            WatchTemplate::JobPostings => "Track new job listings",
+            WatchTemplate::Changelog => "Monitor software releases and updates",
+        }
+    }
+
+    pub fn agent_instructions(&self) -> Option<&'static str> {
+        match self {
+            WatchTemplate::Custom => None,
+            WatchTemplate::PriceDrop => Some(
+                "Track the current price. Alert me when the price drops significantly. \
+                 Note the previous price and new price in the notification."
+            ),
+            WatchTemplate::BackInStock => Some(
+                "Alert me when the item becomes available or back in stock. \
+                 Ignore 'out of stock' or 'unavailable' status unless it changes to available."
+            ),
+            WatchTemplate::JobPostings => Some(
+                "Alert me on NEW job postings only. Ignore updates to existing listings. \
+                 Include the job title and key requirements in the notification."
+            ),
+            WatchTemplate::Changelog => Some(
+                "Summarize new releases and version updates. Alert on major version bumps. \
+                 Include the version number and key changes."
+            ),
+        }
+    }
+
+    /// Map template to Intent for URL transform detection
+    pub fn to_intent(&self) -> Intent {
+        match self {
+            WatchTemplate::Custom => Intent::Generic,
+            WatchTemplate::PriceDrop => Intent::Price,
+            WatchTemplate::BackInStock => Intent::Stock,
+            WatchTemplate::JobPostings => Intent::Jobs,
+            WatchTemplate::Changelog => Intent::Release,
+        }
+    }
+}
+
+/// Generate a human-readable name from a transformed URL
+fn generate_name_from_transform_url(url: &url::Url) -> String {
+    let path = url.path().trim_matches('/');
+    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+
+    if let Some(host) = url.host_str() {
+        // GitHub/GitLab/Codeberg: "owner/repo/releases.atom" -> "owner/repo"
+        if (host == "github.com" || host == "gitlab.com" || host == "codeberg.org")
+            && segments.len() >= 2
+        {
+            let owner = segments[0];
+            let repo = segments[1];
+            return format!("{}/{}", owner, repo);
+        }
+
+        // Reddit: "r/subreddit.rss" -> "r/subreddit"
+        if host.contains("reddit.com") && segments.len() >= 2 && segments[0] == "r" {
+            let subreddit = segments[1].trim_end_matches(".rss");
+            return format!("r/{}", subreddit);
+        }
+
+        // Hacker News
+        if host == "news.ycombinator.com" {
+            return "Hacker News".to_string();
+        }
+
+        // PyPI
+        if host == "pypi.org" && segments.len() >= 2 && segments[0] == "project" {
+            let package = segments[1];
+            return format!("PyPI: {}", package);
+        }
+    }
+
+    // Fallback: use host
+    url.host_str().unwrap_or("Watch").to_string()
 }

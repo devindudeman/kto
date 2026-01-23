@@ -28,6 +28,7 @@ pub enum Mode {
     FilterEdit,    // Editing a single filter
     MemoryInspector, // Agent memory inspection
     ProfileInspector, // User interest profile inspection
+    Health,        // System health dashboard
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -159,6 +160,7 @@ pub enum DiffViewMode {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum WizardStep {
+    Template,
     Url,
     Engine,
     Name,

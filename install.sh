@@ -79,7 +79,8 @@ download_and_install() {
     local tmpdir
 
     tmpdir="$(mktemp -d)"
-    trap 'rm -rf "$tmpdir"' EXIT
+    # Clean up on exit, but handle the case where tmpdir might be unset
+    trap 'rm -rf "${tmpdir:-}"' EXIT
 
     echo "Downloading kto ${version} for ${platform}..."
     curl -fsSL "$url" -o "${tmpdir}/kto.tar.gz"

@@ -10,8 +10,12 @@ pub mod filter;
 pub mod interests;
 pub mod normalize;
 pub mod notify;
+pub mod page_facts;
+pub mod platform;
+pub mod transforms;
 #[cfg(feature = "tui")]
 pub mod tui;
+pub mod validate;
 pub mod watch;
 
 pub use error::{KtoError, Result};
