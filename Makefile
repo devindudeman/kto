@@ -1,4 +1,4 @@
-.PHONY: build release install test clean run ui
+.PHONY: build release install test test-e2e test-all clean run ui
 
 # Default target
 all: build
@@ -18,9 +18,16 @@ install: release
 	cp target/release/kto ~/.local/bin/kto
 	@echo "Installed kto v$$(grep '^version' Cargo.toml | cut -d'"' -f2) to ~/.local/bin/kto"
 
-# Run tests
+# Run unit tests
 test:
 	cargo test
+
+# Run E2E change detection tests
+test-e2e: build
+	python3 tests/e2e/run_suite.py
+
+# Run all tests (unit + E2E)
+test-all: test test-e2e
 
 # Clean build artifacts
 clean:

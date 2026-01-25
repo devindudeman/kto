@@ -33,3 +33,4 @@ flake.lock
 # Internal docs
 ROADMAP.md
 kto-concept.md
+e2e_report.json

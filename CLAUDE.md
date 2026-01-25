@@ -352,6 +352,62 @@ kto new "https://shop.example.com/product for price drops"
 
 ## Testing & Development
 
+### Testing Strategy
+
+kto has three levels of testing with distinct purposes:
+
+| Test Type | Command | Purpose | Deterministic |
+|-----------|---------|---------|---------------|
+| Unit Tests | `make test` | Component-level validation | Yes |
+| E2E Tests | `make test-e2e` | Change detection accuracy | Yes |
+| Live Exploration | Ad-hoc orchestration | Discover edge cases | No |
+
+**E2E tests are the quality gate.** They validate that kto correctly detects changes using a local test server with controlled mutations.
+
+### Running Tests
+
+```bash
+# Unit tests (fast, run often)
+make test
+cargo test
+
+# E2E change detection tests (run before releases)
+make test-e2e
+python3 tests/e2e/run_suite.py
+
+# All tests
+make test-all
+
+# E2E with verbose output
+python3 tests/e2e/run_suite.py --verbose
+
+# Run specific E2E scenario
+python3 tests/e2e/run_suite.py --scenario price
+```
+
+### E2E Test Suite
+
+Located in `tests/e2e/`, the suite uses a local HTTP server with mutation API:
+
+```
+tests/e2e/
+├── README.md           # Full documentation
+├── run_suite.py        # Test runner (22 scenarios)
+└── harness/
+    └── server.py       # Local test server (no dependencies)
+```
+
+**What it validates:**
+- True positives: Price drops, stock changes, new releases detected
+- True negatives: Static content, noise don't trigger false positives
+- Error handling: 403, 500, timeouts handled gracefully
+- Idempotence: Repeated runs don't cause spurious alerts
+
+**Metrics tracked:**
+- Precision (target ≥95%): Low false positives
+- Recall (target ≥90%): Catch real changes
+- Noise Rate (target <5%): Normalization working
+
 ### Test Database Isolation
 ```bash
 KTO_DB=/tmp/test.db kto list --json

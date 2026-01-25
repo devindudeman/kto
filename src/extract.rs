@@ -23,13 +23,22 @@ fn extract_rss(content: &PageContent) -> Result<String> {
     })
 }
 
+/// Minimum characters for readability output to be considered useful.
+/// If readability returns less than this, fall back to full body extraction.
+/// This prevents over-aggressive extraction that misses important content like stock buttons.
+const MIN_READABILITY_CHARS: usize = 50;
+
 /// Auto-detect main content using readability
 fn extract_auto(content: &PageContent) -> Result<String> {
     // Try readability-js first
     if let Ok(readability) = readability_js::Readability::new() {
         if let Ok(article) = readability.parse(&content.html) {
             // Use text_content which is the cleaned plain text
-            if !article.text_content.trim().is_empty() {
+            let text = article.text_content.trim();
+            // Only use readability result if it's substantial enough.
+            // Very short results often mean readability stripped too much content
+            // (e.g., product pages where it keeps only the price).
+            if text.len() >= MIN_READABILITY_CHARS {
                 return Ok(article.text_content);
             }
         }
@@ -42,7 +51,7 @@ fn extract_auto(content: &PageContent) -> Result<String> {
         }
     }
 
-    // Last resort: extract text from body ourselves
+    // Fallback: extract text from body ourselves (more complete than readability)
     let document = Html::parse_document(&content.html);
     let body_selector =
         Selector::parse("body").map_err(|e| KtoError::ExtractionError(format!("{:?}", e)))?;

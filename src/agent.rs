@@ -105,6 +105,13 @@ Guidelines:
 - If user profile is present, use it to judge relevance (but watch instructions take precedence)
 - global_observation: If you notice a pattern about user preferences, note it here
 
+CRITICAL CONSISTENCY RULES:
+- If your analysis says "this is not the target change" or "not what user wants", then notify MUST be false
+- If analysis says "still sold out", "still unavailable", or status unchanged, then notify MUST be false
+- title MUST match the actual change (e.g., if still sold out, never use "Back In Stock")
+- Page recovery from errors (error page → working page) is NOT a stock change - only notify if stock status ACTUALLY changed
+- When in doubt about stock/availability, check if the purchase button text changed (e.g., "Add to Cart" appeared)
+
 Keep memory under 16KB. Only store information useful for future change analysis."#;
 
 const PRECEDENCE_RULES: &str = r#"=== PRECEDENCE RULES ===
