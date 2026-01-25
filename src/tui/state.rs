@@ -363,8 +363,23 @@ impl App {
     }
 
     pub fn toggle_reminder_enabled(&mut self) -> Result<()> {
-        if let Some(reminder) = self.reminders.get(self.selected_reminder) {
+        if let Some(reminder) = self.reminders.get(self.selected_reminder).cloned() {
             let new_enabled = !reminder.enabled;
+
+            // When resuming a past-due recurring reminder, advance to next occurrence
+            if new_enabled && reminder.trigger_at < chrono::Utc::now() {
+                if let Some(interval) = reminder.interval_secs {
+                    let interval_duration = chrono::Duration::seconds(interval as i64);
+                    let mut next_trigger = reminder.trigger_at;
+                    let now = chrono::Utc::now();
+                    while next_trigger <= now {
+                        next_trigger = next_trigger + interval_duration;
+                    }
+                    self.db.update_reminder_trigger(&reminder.id, next_trigger)?;
+                    self.reminders[self.selected_reminder].trigger_at = next_trigger;
+                }
+            }
+
             self.db.set_reminder_enabled(&reminder.id, new_enabled)?;
             self.reminders[self.selected_reminder].enabled = new_enabled;
             let status = if new_enabled { "resumed" } else { "paused" };

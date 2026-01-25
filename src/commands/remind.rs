@@ -126,8 +126,33 @@ pub fn cmd_remind_resume(id_or_name: String) -> Result<()> {
     let reminder = db.get_reminder(&id_or_name)?
         .ok_or_else(|| kto::KtoError::WatchNotFound(id_or_name.clone()))?;
 
+    // If the trigger time is in the past and it's a recurring reminder,
+    // advance to the next occurrence to avoid immediate firing
+    let now = Utc::now();
+    if reminder.trigger_at < now {
+        if let Some(interval) = reminder.interval_secs {
+            let interval_duration = chrono::Duration::seconds(interval as i64);
+            let mut next_trigger = reminder.trigger_at;
+            while next_trigger <= now {
+                next_trigger = next_trigger + interval_duration;
+            }
+            db.update_reminder_trigger(&reminder.id, next_trigger)?;
+            let local_time: chrono::DateTime<chrono::Local> = next_trigger.into();
+            println!("\nResumed reminder: {}", reminder.name);
+            println!("  Next trigger: {}", local_time.format("%Y-%m-%d %H:%M"));
+        } else {
+            // One-shot reminder that's past due - just enable it
+            db.set_reminder_enabled(&reminder.id, true)?;
+            println!("\nResumed reminder: {}", reminder.name);
+            println!("  Warning: One-time reminder is past due and will fire immediately");
+        }
+    } else {
+        db.set_reminder_enabled(&reminder.id, true)?;
+        println!("\nResumed reminder: {}", reminder.name);
+    }
+
+    // Always ensure it's enabled
     db.set_reminder_enabled(&reminder.id, true)?;
-    println!("\nResumed reminder: {}", reminder.name);
 
     Ok(())
 }

@@ -442,8 +442,14 @@ pub fn cmd_daemon() -> Result<()> {
 
                 // Handle recurring vs one-shot
                 if let Some(interval) = reminder.interval_secs {
-                    // Recurring: update trigger time to next occurrence
-                    let next_trigger = Utc::now() + chrono::Duration::seconds(interval as i64);
+                    // Recurring: advance from trigger_at to preserve original time-of-day
+                    // Add intervals until we get a future time
+                    let interval_duration = chrono::Duration::seconds(interval as i64);
+                    let mut next_trigger = reminder.trigger_at + interval_duration;
+                    let now = Utc::now();
+                    while next_trigger <= now {
+                        next_trigger = next_trigger + interval_duration;
+                    }
                     let _ = db.update_reminder_trigger(&reminder.id, next_trigger);
                 } else {
                     // One-shot: delete the reminder
