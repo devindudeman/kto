@@ -26,21 +26,46 @@ const CONFIDENCE_THRESHOLD: f32 = 0.7;
 
 /// Check if kto daemon is currently running
 pub fn is_daemon_running() -> bool {
+    // Method 1: Check PID file (manual daemon start)
     let home = match std::env::var("HOME") {
         Ok(h) => h,
-        Err(_) => return false,
+        Err(_) => return check_daemon_process(),
     };
     let pid_path = std::path::Path::new(&home).join(".local/share/kto/daemon.pid");
-    let pid_str = match std::fs::read_to_string(&pid_path) {
-        Ok(s) => s,
-        Err(_) => return false,
-    };
-    let pid: u32 = match pid_str.trim().parse() {
-        Ok(p) => p,
-        Err(_) => return false,
-    };
-    // Check if process exists (Linux-specific)
-    std::path::Path::new("/proc").join(pid.to_string()).exists()
+    if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
+        if let Ok(pid) = pid_str.trim().parse::<u32>() {
+            if std::path::Path::new("/proc").join(pid.to_string()).exists() {
+                return true;
+            }
+        }
+    }
+
+    // Method 2: Check systemd user service
+    if let Ok(output) = std::process::Command::new("systemctl")
+        .args(["--user", "is-active", "kto"])
+        .output()
+    {
+        if output.status.success() {
+            let status = String::from_utf8_lossy(&output.stdout);
+            if status.trim() == "active" {
+                return true;
+            }
+        }
+    }
+
+    // Method 3: Check for running kto daemon process
+    check_daemon_process()
+}
+
+/// Check if there's a kto daemon process running via pgrep
+fn check_daemon_process() -> bool {
+    if let Ok(output) = std::process::Command::new("pgrep")
+        .args(["-f", "kto daemon"])
+        .output()
+    {
+        return output.status.success() && !output.stdout.is_empty();
+    }
+    false
 }
 
 /// Create a new watch
@@ -531,7 +556,7 @@ pub fn cmd_new(
     let (name, final_url, final_interval, final_agent_enabled, final_agent_instructions, final_extraction, final_engine) =
         if let Some(ref suggestion) = enhanced_suggestion {
             // Enhanced wizard flow with variant display
-            let result = display_enhanced_confirmation(
+            match display_enhanced_confirmation(
                 &url,
                 suggestion,
                 &extraction,
@@ -539,8 +564,23 @@ pub fn cmd_new(
                 &name_override,
                 interval,
                 yes,
-            )?;
-            result
+            ) {
+                Ok(result) => result,
+                Err(kto::KtoError::RetryWithDeepResearch) => {
+                    // User requested deep research - run that flow instead
+                    return run_deep_research_flow(
+                        &input,
+                        &url,
+                        name_override,
+                        interval,
+                        tags,
+                        use_profile,
+                        yes,
+                        interactive,
+                    );
+                }
+                Err(e) => return Err(e),
+            }
         } else {
             // Traditional flow - No enhanced AI suggestion
             if !yes {
@@ -1263,15 +1303,12 @@ fn display_enhanced_confirmation(
             for reason in &suggestion.uncertainty_reasons {
                 println!("    • {}", reason);
             }
-            // Suggest deep research mode
-            let claude_available = agent::claude_version().is_some();
-            if claude_available {
-                println!();
-                println!("  Tip: Use --research for thorough page analysis");
-            }
         }
         println!();
     }
+
+    // Check if Claude is available for deep research option
+    let claude_available = agent::claude_version().is_some();
 
     // Determine final URL (with variant if matched)
     let final_url = if let Some(ref intent_match) = suggestion.intent_match {
@@ -1314,18 +1351,29 @@ fn display_enhanced_confirmation(
         ));
     }
 
-    // Offer choices: Create, Customize, Cancel
-    let choices = if !suggestion.variants.is_empty() && suggestion.variants.len() > 1 {
-        vec!["Create Watch", "Select Different Variant", "Customize", "Cancel"]
-    } else {
-        vec!["Create Watch", "Customize", "Cancel"]
-    };
+    // Offer choices: Create, Customize, Cancel (+ Deep Research if low confidence)
+    let mut choices = vec!["Create Watch"];
+
+    // Add Deep Research option at the top if low confidence and Claude available
+    if low_confidence && claude_available {
+        choices.insert(0, "Run Deep Research");
+    }
+
+    if !suggestion.variants.is_empty() && suggestion.variants.len() > 1 {
+        choices.push("Select Different Variant");
+    }
+    choices.push("Customize");
+    choices.push("Cancel");
 
     let choice = Select::new("What would you like to do?", choices)
         .prompt()
         .map_err(|e| kto::KtoError::ConfigError(e.to_string()))?;
 
     match choice {
+        "Run Deep Research" => {
+            // Signal to caller to retry with deep research mode
+            return Err(kto::KtoError::RetryWithDeepResearch);
+        }
         "Create Watch" => {
             let name = name_override.clone().unwrap_or_else(|| suggestion.name.clone());
             let engine = if suggestion.needs_js { Engine::Playwright } else { default_engine };

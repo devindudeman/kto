@@ -311,11 +311,23 @@ pub fn cmd_daemon() -> Result<()> {
     let db = Database::open()?;
     let config = Config::load()?;
 
-    // Set up Ctrl+C handler
+    // Write PID file for daemon detection
+    let pid_path = Config::data_dir()
+        .unwrap_or_else(|_| std::path::PathBuf::from("."))
+        .join("daemon.pid");
+    if let Some(parent) = pid_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&pid_path, std::process::id().to_string());
+
+    // Set up Ctrl+C handler - also cleans up PID file
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
+    let pid_path_clone = pid_path.clone();
     ctrlc::set_handler(move || {
         println!("\n\nShutting down...");
+        // Clean up PID file
+        let _ = std::fs::remove_file(&pid_path_clone);
         r.store(false, Ordering::SeqCst);
     }).map_err(|e| kto::KtoError::ConfigError(format!("Failed to set Ctrl+C handler: {}", e)))?;
 

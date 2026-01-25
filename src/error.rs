@@ -49,6 +49,9 @@ pub enum KtoError {
 
     #[error("Feed parsing error: {0}")]
     FeedParseError(String),
+
+    #[error("Retry with deep research mode")]
+    RetryWithDeepResearch,
 }
 
 impl KtoError {
