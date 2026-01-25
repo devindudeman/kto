@@ -1125,14 +1125,25 @@ pub fn cmd_delete(id_or_name: &str, skip_confirm: bool) -> Result<()> {
 // ============================================================================
 
 /// Perform parallel HTTP and Playwright fetches for dual content analysis
+/// If `skip_http` is true, only perform Playwright fetch (for known JS-heavy sites)
 fn dual_fetch(url: &str) -> Result<(Option<PageContent>, Option<PageContent>)> {
+    dual_fetch_with_hint(url, false)
+}
+
+/// Perform HTTP and/or Playwright fetches based on hints
+/// If `skip_http` is true, only perform Playwright fetch (for known JS-heavy sites like npm)
+fn dual_fetch_with_hint(url: &str, skip_http: bool) -> Result<(Option<PageContent>, Option<PageContent>)> {
     let url_owned = url.to_string();
 
-    // Start HTTP fetch in a thread
-    let url_http = url_owned.clone();
-    let http_handle = thread::spawn(move || {
-        fetch::fetch(&url_http, Engine::Http, &std::collections::HashMap::new())
-    });
+    // Start HTTP fetch in a thread (unless skipped for known JS-heavy sites)
+    let http_handle = if !skip_http {
+        let url_http = url_owned.clone();
+        Some(thread::spawn(move || {
+            fetch::fetch(&url_http, Engine::Http, &std::collections::HashMap::new())
+        }))
+    } else {
+        None
+    };
 
     // Start Playwright fetch if available
     let playwright_available = check_playwright().is_ready();
@@ -1146,10 +1157,14 @@ fn dual_fetch(url: &str) -> Result<(Option<PageContent>, Option<PageContent>)> {
     };
 
     // Wait for HTTP result
-    let http_result = http_handle
-        .join()
-        .map_err(|_| kto::KtoError::ConfigError("HTTP fetch thread panicked".into()))?;
-    let http_content = http_result.ok();
+    let http_content = if let Some(handle) = http_handle {
+        handle
+            .join()
+            .map_err(|_| kto::KtoError::ConfigError("HTTP fetch thread panicked".into()))?
+            .ok()
+    } else {
+        None
+    };
 
     // Wait for Playwright result if started
     let js_content = if let Some(handle) = js_handle {
@@ -1162,7 +1177,13 @@ fn dual_fetch(url: &str) -> Result<(Option<PageContent>, Option<PageContent>)> {
     };
 
     // Report what we got
-    let http_status = if http_content.is_some() { "✓" } else { "✗" };
+    let http_status = if skip_http {
+        "–" // Skipped
+    } else if http_content.is_some() {
+        "✓"
+    } else {
+        "✗"
+    };
     let js_status = if js_content.is_some() {
         "✓"
     } else if playwright_available {
@@ -1871,8 +1892,25 @@ fn run_deep_research_flow(
     println!("\n  {} Deep Research Mode", "🔬".bold());
     println!("  Analyzing {}...", url);
 
+    // Check if there's a transform rule that specifies Playwright
+    // If so, skip HTTP fetch to avoid timeout on JS-heavy sites (e.g., npm)
+    let parsed_url = url::Url::parse(url).ok();
+    let detected_intent = Intent::detect(input);
+    let transform_match = parsed_url
+        .as_ref()
+        .and_then(|u| transforms::match_transform(u, detected_intent));
+
+    let skip_http = transform_match
+        .as_ref()
+        .map(|m| m.engine == Engine::Playwright)
+        .unwrap_or(false);
+
+    if skip_http {
+        println!("  Note: Transform rule specifies Playwright - skipping HTTP fetch");
+    }
+
     // Step 1: Dual fetch (HTTP and Playwright)
-    let (http_content, js_content) = dual_fetch(url)?;
+    let (http_content, js_content) = dual_fetch_with_hint(url, skip_http)?;
 
     // Step 2: Extract content from both
     let http_html = http_content.as_ref().map(|c| c.html.as_str());

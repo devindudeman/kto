@@ -12,6 +12,9 @@ use crate::watch::Engine;
 /// Default HTTP request timeout in seconds
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 
+/// Default Playwright timeout in milliseconds (longer for JS-heavy sites)
+const DEFAULT_PLAYWRIGHT_TIMEOUT_MS: u64 = 45000;
+
 /// Shared HTTP agent for connection pooling
 static HTTP_AGENT: Lazy<ureq::Agent> = Lazy::new(|| {
     ureq::Agent::config_builder()
@@ -146,7 +149,7 @@ fn fetch_playwright(url: &str) -> Result<PageContent> {
     let output = Command::new("node")
         .arg(&script_path)
         .arg(url)
-        .arg("30000") // 30 second timeout
+        .arg(DEFAULT_PLAYWRIGHT_TIMEOUT_MS.to_string()) // Timeout in ms
         .current_dir(&data_dir)
         .output()?;
 
