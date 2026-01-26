@@ -11,12 +11,12 @@ build:
 release:
 	cargo build --release --features tui
 
-# Build and install to ~/.local/bin
+# Build and install to ~/.cargo/bin
 install: release
 	@pkill -x kto 2>/dev/null || true
 	@sleep 0.2
-	cp target/release/kto ~/.local/bin/kto
-	@echo "Installed kto v$$(grep '^version' Cargo.toml | cut -d'"' -f2) to ~/.local/bin/kto"
+	cp target/release/kto ~/.cargo/bin/kto
+	@echo "Installed kto v$$(grep '^version' Cargo.toml | cut -d'"' -f2) to ~/.cargo/bin/kto"
 
 # Run unit tests
 test:
