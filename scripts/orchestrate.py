@@ -172,6 +172,7 @@ def _min_interval(state: RunState) -> int:
 
 def main(argv: list | None = None) -> None:
     """Entry point for the learning loop orchestrator."""
+    global _shutdown_requested
 
     args = parse_args(argv)
     config = _build_config(args)

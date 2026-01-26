@@ -146,7 +146,7 @@ class KtoClient:
 
         # Agent instructions
         if agent_instructions:
-            args.extend(["--agent", "--instructions", agent_instructions])
+            args.extend(["--agent", "--agent-instructions", agent_instructions])
 
         # Tags
         if tags:
