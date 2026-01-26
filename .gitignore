@@ -18,6 +18,10 @@ Thumbs.db
 *.db
 *.db-journal
 
+# Python
+__pycache__/
+*.pyc
+
 # Logs
 *.log
 
