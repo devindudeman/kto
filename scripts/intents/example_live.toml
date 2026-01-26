@@ -1,0 +1,53 @@
+# Live Intent Definitions for kto Learning Loop
+# These use real websites for validation-only mode.
+# Live mode does NOT generate new rules — it validates E2E-learned rules against real sites.
+# Use with: python scripts/orchestrate.py --intents scripts/intents/example_live.toml --live-validate
+
+[meta]
+mode = "live"
+description = "Live intent definitions for validating E2E-learned rules against real websites"
+
+# =============================================================================
+# Price monitoring (CoinGecko API — public, no auth)
+# =============================================================================
+
+[[intents]]
+name = "bitcoin-price"
+url = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd"
+intent_type = "price"
+domain_class = "api"
+engine = "http"
+extraction = "auto"
+interval_secs = 300
+agent_instructions = "Monitor Bitcoin price. Alert if price changes by more than 1% since last check."
+tags = ["price", "crypto", "live"]
+
+# =============================================================================
+# Release monitoring (GitHub Atom feed — public, reliable)
+# =============================================================================
+
+[[intents]]
+name = "rust-releases"
+url = "https://github.com/rust-lang/rust/releases.atom"
+intent_type = "release"
+domain_class = "software"
+engine = "rss"
+extraction = "rss"
+interval_secs = 1800
+agent_instructions = "Monitor for new Rust releases. Alert on stable releases only."
+tags = ["release", "software", "live"]
+
+# =============================================================================
+# News monitoring (Hacker News RSS — public)
+# =============================================================================
+
+[[intents]]
+name = "hackernews"
+url = "https://hnrss.org/newest?points=100"
+intent_type = "news"
+domain_class = "news-site"
+engine = "rss"
+extraction = "rss"
+interval_secs = 900
+agent_instructions = "Monitor for new highly-upvoted Hacker News articles. Summarize new titles."
+tags = ["news", "live"]

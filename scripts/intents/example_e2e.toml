@@ -1,0 +1,155 @@
+# E2E Intent Definitions for kto Learning Loop
+# These use the local test server (tests/e2e/harness/server.py) with deterministic mutations.
+# Start the server first: python3 tests/e2e/harness/server.py --port 8787
+
+[meta]
+mode = "e2e"
+description = "E2E intent definitions for learning loop with deterministic ground truth"
+
+# =============================================================================
+# Price monitoring intent
+# =============================================================================
+
+[[intents]]
+name = "price-drop"
+url = "http://127.0.0.1:8787/product"
+intent_type = "price"
+domain_class = "e-commerce"
+engine = "http"
+extraction = "auto"
+interval_secs = 30
+agent_instructions = "Monitor the price. Alert when price drops below $80. Report the exact price found."
+tags = ["price", "e-commerce"]
+expected_detections = 3
+
+[[intents.mutations]]
+cycle = 2
+field = "product_price"
+value = "$89.99"
+expect_detection = true
+description = "Moderate price drop (still above threshold)"
+
+[[intents.mutations]]
+cycle = 5
+field = "product_price"
+value = "$79.99"
+expect_detection = true
+description = "Price drops below $80 threshold"
+
+[[intents.mutations]]
+cycle = 8
+field = "product_price"
+value = "$74.99"
+expect_detection = true
+description = "Further price drop"
+
+[[intents.mutations]]
+cycle = 11
+field = "product_price"
+value = "$99.99"
+expect_detection = true
+description = "Price back to original (should detect change back)"
+
+# =============================================================================
+# Stock monitoring intent
+# =============================================================================
+
+[[intents]]
+name = "stock-alert"
+url = "http://127.0.0.1:8787/product"
+intent_type = "stock"
+domain_class = "e-commerce"
+engine = "http"
+extraction = "auto"
+interval_secs = 30
+agent_instructions = "Monitor stock status. Alert when item comes back in stock. Look for 'IN STOCK' or 'Add to Cart' text."
+tags = ["stock", "e-commerce"]
+expected_detections = 2
+
+[[intents.mutations]]
+cycle = 3
+field = "product_stock"
+value = "IN STOCK"
+expect_detection = true
+description = "Product comes back in stock"
+
+[[intents.mutations]]
+cycle = 7
+field = "product_stock"
+value = "SOLD OUT"
+expect_detection = true
+description = "Product goes out of stock again"
+
+[[intents.mutations]]
+cycle = 10
+field = "product_stock"
+value = "IN STOCK"
+expect_detection = true
+description = "Back in stock again"
+
+# =============================================================================
+# Release monitoring intent
+# =============================================================================
+
+[[intents]]
+name = "release-tracker"
+url = "http://127.0.0.1:8787/releases"
+intent_type = "release"
+domain_class = "software"
+engine = "http"
+extraction = "auto"
+interval_secs = 60
+agent_instructions = "Monitor for new software releases. Alert on new version numbers. Report the version number."
+tags = ["release", "software"]
+expected_detections = 3
+
+[[intents.mutations]]
+cycle = 3
+field = "releases"
+value = '["v1.0.0", "v1.1.0"]'
+expect_detection = true
+description = "New minor release v1.1.0"
+
+[[intents.mutations]]
+cycle = 6
+field = "releases"
+value = '["v1.0.0", "v1.1.0", "v2.0.0"]'
+expect_detection = true
+description = "New major release v2.0.0"
+
+[[intents.mutations]]
+cycle = 10
+field = "releases"
+value = '["v1.0.0", "v1.1.0", "v2.0.0", "v2.0.1"]'
+expect_detection = true
+description = "Patch release v2.0.1"
+
+# =============================================================================
+# News monitoring intent
+# =============================================================================
+
+[[intents]]
+name = "news-feed"
+url = "http://127.0.0.1:8787/news"
+intent_type = "news"
+domain_class = "news-site"
+engine = "http"
+extraction = "auto"
+interval_secs = 60
+agent_instructions = "Monitor for new articles. Alert when new articles appear. Summarize the new article titles."
+tags = ["news"]
+expected_detections = 2
+
+[[intents.mutations]]
+cycle = 4
+field = "articles"
+value = '[{"title": "First Article", "date": "2026-01-20"}, {"title": "Second Article", "date": "2026-01-21"}, {"title": "Third Article", "date": "2026-01-22"}, {"title": "Breaking: New Discovery", "date": "2026-01-25"}]'
+expect_detection = true
+description = "New article added"
+
+[[intents.mutations]]
+cycle = 9
+field = "articles"
+value = '[{"title": "First Article", "date": "2026-01-20"}, {"title": "Second Article", "date": "2026-01-21"}, {"title": "Third Article", "date": "2026-01-22"}, {"title": "Breaking: New Discovery", "date": "2026-01-25"}, {"title": "Major Update Released", "date": "2026-01-25"}]'
+expect_detection = true
+description = "Another new article"

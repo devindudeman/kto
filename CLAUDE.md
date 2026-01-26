@@ -57,6 +57,7 @@ src/
 ├── notify.rs            # Notification dispatch (ntfy, Gotify, Slack, Discord, Telegram, Pushover, Matrix)
 ├── agent.rs             # Claude CLI integration for AI analysis
 ├── config.rs            # Global configuration, NotifyTarget
+├── intent.rs            # ParsedIntent, threshold parsing, to_instructions()
 ├── transforms.rs        # URL transform rules for known sites (GitHub, GitLab, Reddit, etc.)
 ├── tui/                 # Ratatui-based terminal dashboard (feature-gated)
 │   ├── mod.rs           # Entry point, event loop, re-exports
@@ -289,6 +290,61 @@ TransformRule {
 }
 ```
 
+## Natural Language URL Discovery
+
+When a user runs `kto new` without a URL, kto uses AI to discover the best URL to monitor based on the user's natural language description. Requires Claude CLI.
+
+### How It Works
+
+```
+User input (no URL) → Parse intent (src/intent.rs) → Claude CLI + WebSearch discovers URL
+  → Show results with confidence → User confirms → Preflight fetch/extract → Create watch
+```
+
+1. `extract_url()` finds no URL in input
+2. `ParsedIntent::new()` parses goal, threshold, target item, keywords
+3. `agent::discover_url()` calls Claude CLI with WebSearch to research and find the best public URL
+4. Results shown with host prominently displayed (security), confidence color-coded
+5. User confirms or picks alternative, enters manual URL, or escalates to deep research
+6. Preflight fetch validates the URL extracts useful content before creating the watch
+
+### Examples
+
+```bash
+# AI discovers CoinGecko API for bitcoin price
+kto new "let me know when bitcoin goes above 100k"
+
+# AI finds product page for stock monitoring
+kto new "alert me when RTX 5090 is back in stock"
+
+# AI finds GitHub releases feed
+kto new "notify me about new Rust releases"
+
+# With --yes: auto-accepts if confidence >= 0.5 AND preflight extraction succeeds
+kto new "bitcoin price" --yes
+```
+
+### Key Files
+
+| File | Role |
+|------|------|
+| `src/intent.rs` | `ParsedIntent`, threshold parsing, `to_instructions()` |
+| `src/agent.rs` | `UrlDiscoveryResult`, `discover_url()`, `URL_DISCOVERY_PROMPT` |
+| `src/commands/watch.rs` | `run_url_discovery_flow()`, `display_discovery_results()`, `create_watch_from_discovery()` |
+
+### Confidence Thresholds
+
+- **Interactive mode**: >= 0.3 to show results (user confirms)
+- **`--yes` mode**: >= 0.5 to auto-accept
+- **< 0.3**: Treated as discovery failure, offers manual URL entry
+
+### Fallbacks
+
+1. Tries Claude with `--allowedTools WebSearch,WebFetch --max-turns 5` first
+2. Falls back to Claude without web tools (`--max-turns 3`) if web search fails
+3. 60-second timeout on Claude subprocess to prevent hangs
+4. All non-essential fields use `#[serde(default)]` for resilient JSON parsing
+
 ## Deep Research Mode
 
 When the wizard's simple approaches fail (URL transforms don't match, basic AI analysis has low confidence), deep research mode allows Claude to spend more tokens thoroughly analyzing a page.
@@ -426,6 +482,65 @@ kto show <watch> --json
 kto test <watch> --json
 kto history <watch> --json
 ```
+
+## Learning Loop / Orchestration
+
+kto includes a learning loop system that discovers what makes monitors effective and feeds that knowledge into the creation pipeline (`kto new`).
+
+### Purpose
+
+- **Before**: `kto new "alert me when bitcoin drops"` creates a generic monitor
+- **After**: Knowledge base says "price intents work best with selector extraction, 5-min intervals" and creates an effective monitor immediately
+
+### Architecture
+
+```
+Learning Loop (12h) → knowledge.json → kto new (creation pipeline)
+
+Loop: Intent TOML → Create Monitors → Cycle:
+  1. Observe  (run checks)
+  2. Evaluate (deterministic ground truth in E2E)
+  3. Experiment (A/B test variations)
+  4. Learn (extract creation rules → knowledge.json)
+```
+
+**E2E mode** is the primary learning source (deterministic ground truth). **Live mode** validates E2E-learned rules against real websites but does NOT generate new rules.
+
+### Entry Point
+
+```bash
+python scripts/orchestrate.py --intents scripts/intents/example_e2e.toml --duration 12
+python scripts/orchestrate.py --intents scripts/intents/example_e2e.toml --duration 0.1  # smoke test
+python scripts/orchestrate.py --resume --state-dir /tmp/kto-orchestrate/  # resume
+```
+
+### Knowledge File
+
+`~/.local/share/kto/knowledge.json` — schema-versioned creation rules scoped by intent type + domain class.
+
+Rules are consumed by `src/agent.rs:load_creation_knowledge()` and applied as defaults in `cmd_new` with precedence: user override > discovery result > domain rule > intent rule > global default.
+
+### Key Files
+
+| File | Role |
+|------|------|
+| `scripts/orchestrate.py` | Entry point, arg parsing, main loop |
+| `scripts/orchestrate/config.py` | Config, intent weights, SLA map |
+| `scripts/orchestrate/state.py` | RunState, MonitorState, atomic persistence |
+| `scripts/orchestrate/cycle.py` | CycleRunner: observe → evaluate → experiment → learn |
+| `scripts/orchestrate/efficacy.py` | F1-based per-intent scoring |
+| `scripts/orchestrate/evaluator.py` | Deterministic E2E eval + Claude live validation |
+| `scripts/orchestrate/experimenter.py` | Time-blocked A/B protocol |
+| `scripts/orchestrate/knowledge.py` | Schema-versioned rules, decay, precedence |
+| `scripts/orchestrate/kto_client.py` | kto CLI wrapper with timeouts |
+| `scripts/orchestrate/report.py` | Learning-focused report |
+| `scripts/orchestrate/server_bridge.py` | E2E test server mutation API client |
+| `scripts/orchestrate/intents.py` | TOML intent loader |
+| `scripts/orchestrate/log.py` | Structured JSONL + human logging |
+| `scripts/intents/example_e2e.toml` | E2E intent definitions |
+| `scripts/intents/example_live.toml` | Live intent definitions |
+| `src/agent.rs` | `load_creation_knowledge()` for Rust-side consumption |
+| `src/commands/watch.rs` | Consults knowledge base in `cmd_new` |
 
 ## Key Dependencies
 - **clap** - CLI argument parsing
