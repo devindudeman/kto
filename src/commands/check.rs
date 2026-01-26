@@ -475,6 +475,18 @@ pub fn check_watch(db: &Database, config: &Config, watch: &Watch) -> Result<()> 
 
     // Extract and normalize
     let extracted = extract::extract(&content, &watch.extraction)?;
+
+    // Runtime safety net: if extraction yields very little content and we're not
+    // already using Full, try Full extraction as a fallback. This catches cases
+    // where the page structure changed and the configured strategy no longer works.
+    let extracted = if extracted.len() < 50 && !matches!(watch.extraction, Extraction::Full) {
+        eprintln!("  [WARN] {} extraction yielded only {} chars, trying full",
+                  watch.name, extracted.len());
+        extract::extract(&content, &Extraction::Full).unwrap_or(extracted)
+    } else {
+        extracted
+    };
+
     let normalized = normalize(&extracted, &watch.normalization);
     let new_hash = hash_content(&normalized);
 

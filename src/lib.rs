@@ -7,6 +7,7 @@ pub mod error;
 pub mod extract;
 pub mod fetch;
 pub mod filter;
+pub mod intent;
 pub mod interests;
 pub mod normalize;
 pub mod notify;

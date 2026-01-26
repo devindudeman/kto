@@ -7,11 +7,12 @@ use colored::Colorize;
 use inquire::{Confirm, Select, Text};
 use uuid::Uuid;
 
-use kto::agent::{self, DeepResearchResult, EnhancedSetupSuggestion};
+use kto::agent::{self, DeepResearchResult, EnhancedSetupSuggestion, UrlDiscoveryResult};
 use kto::config::Config;
 use kto::db::Database;
 use kto::extract;
 use kto::fetch::{self, check_playwright, PageContent, PlaywrightStatus};
+use kto::intent::ParsedIntent;
 use kto::normalize::{hash_content, normalize};
 use kto::transforms::{self, Intent, TransformMatch};
 use kto::watch::{AgentConfig, Engine, Extraction, Snapshot, Watch};
@@ -200,13 +201,39 @@ pub fn cmd_new(
         return Ok(());
     }
 
-    // Try to extract URL from input
-    let mut url = extract_url(&input).ok_or_else(|| {
-        kto::KtoError::ConfigError(format!(
-            "No URL found in: '{}'\n  Tip: Paste the full URL (e.g., https://example.com/page)",
-            truncate_str(&input, 50)
-        ))
-    })?;
+    // Try to extract URL from input, or discover one via AI
+    let mut url = match extract_url(&input) {
+        Some(u) => u,
+        None => {
+            // No URL found — try AI-powered URL discovery
+            let claude_available = agent::claude_version().is_some();
+            if !claude_available {
+                return Err(kto::KtoError::ConfigError(format!(
+                    "No URL found in: '{}'\n  \
+                     Tip: Include a URL (e.g., https://example.com/page)\n  \
+                     Or install Claude CLI for AI-powered URL discovery:\n  \
+                     curl -fsSL https://claude.ai/install.sh | bash",
+                    truncate_str(&input, 50)
+                )));
+            }
+
+            // Enter URL discovery flow
+            return run_url_discovery_flow(
+                &input,
+                &db,
+                name_override,
+                interval,
+                tags,
+                use_profile,
+                use_agent,
+                agent_instructions,
+                selector,
+                research,
+                yes,
+                interactive,
+            );
+        }
+    };
 
     // Try URL transform detection first (for known sites like GitHub, GitLab, etc.)
     let detected_intent = Intent::detect(&input);
@@ -273,6 +300,28 @@ pub fn cmd_new(
         || input.contains("price") || input.contains("stock") || input.contains("available")
         || input.contains("back in") || input.contains("drop");
 
+    // Consult knowledge base for learned defaults (from learning loop)
+    let knowledge_defaults = if has_intent {
+        let detected = transforms::Intent::detect(&input);
+        let intent_str = match detected {
+            transforms::Intent::Price => "price",
+            transforms::Intent::Stock => "stock",
+            transforms::Intent::Release => "release",
+            transforms::Intent::Jobs => "jobs",
+            transforms::Intent::News => "news",
+            transforms::Intent::Generic => "generic",
+        };
+        match agent::load_creation_knowledge(intent_str, None) {
+            Some(k) => {
+                eprintln!("  {} Using learned defaults for {} intents", "i".cyan(), intent_str);
+                Some(k)
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
+
     // Check if Claude CLI is available for enhanced wizard
     let claude_available = agent::claude_version().is_some();
 
@@ -321,11 +370,11 @@ pub fn cmd_new(
             }
         }
 
-        // Extract content from both fetches
+        // Extract content from both fetches using smart strategy selection
         let http_extracted = http_content.as_ref()
-            .and_then(|c| extract::extract(c, &Extraction::Auto).ok());
+            .map(|c| extract::pick_best_extraction(c, detected_intent).1);
         let js_extracted = js_content.as_ref()
-            .and_then(|c| extract::extract(c, &Extraction::Auto).ok());
+            .map(|c| extract::pick_best_extraction(c, detected_intent).1);
 
         // Get title from whichever fetch succeeded
         let title = js_content.as_ref()
@@ -504,15 +553,20 @@ pub fn cmd_new(
             }
         };
 
-        // Determine extraction strategy
-        let extraction = match (&selector, &engine) {
-            (Some(ref sel), _) => Extraction::Selector { selector: sel.clone() },
-            (None, Engine::Rss) => Extraction::Rss,
-            (None, _) => Extraction::Auto,
+        // Determine extraction strategy (smart: compare multiple strategies)
+        let (extraction, mut extracted) = match (&selector, &engine) {
+            (Some(ref sel), _) => {
+                let ext = Extraction::Selector { selector: sel.clone() };
+                let extr = extract::extract(&content, &ext)?;
+                (ext, extr)
+            }
+            (None, Engine::Rss) => {
+                let ext = Extraction::Rss;
+                let extr = extract::extract(&content, &ext)?;
+                (ext, extr)
+            }
+            (None, _) => extract::pick_best_extraction(&content, detected_intent),
         };
-
-        // Extract content
-        let mut extracted = extract::extract(&content, &extraction)?;
         let title = extract::extract_title(&content.html)
             .unwrap_or_else(|| "Untitled".to_string());
 
@@ -546,10 +600,14 @@ pub fn cmd_new(
     };
 
     // Determine extraction strategy based on selector or engine
+    // Uses multi-strategy comparison when no selector/RSS is specified
     let extraction = match (&selector, &engine) {
         (Some(ref sel), _) => Extraction::Selector { selector: sel.clone() },
         (None, Engine::Rss) => Extraction::Rss,
-        (None, _) => Extraction::Auto,
+        (None, _) => {
+            let (best_ext, _) = extract::pick_best_extraction(&content, detected_intent);
+            best_ext
+        }
     };
 
     // Apply enhanced AI suggestions or use traditional flow
@@ -662,6 +720,47 @@ pub fn cmd_new(
 
             (name, url.clone(), interval, agent_enabled, final_instructions, extraction.clone(), engine)
         };
+
+    // Apply knowledge base defaults where user/AI didn't specify
+    // Precedence: user override > discovery/AI result > knowledge default > global default
+    let (final_interval, final_engine, final_extraction) = if let Some(ref kb) = knowledge_defaults {
+        let ki = if interval != 900 { final_interval } else {
+            kb.interval_secs.map(|i| i as u64).unwrap_or(final_interval)
+        };
+        let ke = if use_js || use_rss {
+            final_engine.clone()
+        } else if enhanced_suggestion.is_some() {
+            final_engine.clone() // AI suggestion takes precedence
+        } else {
+            match kb.engine.as_deref() {
+                Some("rss") => Engine::Rss,
+                Some("playwright") => Engine::Playwright,
+                _ => final_engine.clone(),
+            }
+        };
+        let kx = if selector.is_some() {
+            final_extraction.clone()
+        } else if enhanced_suggestion.is_some() {
+            final_extraction.clone()
+        } else {
+            match kb.extraction.as_deref() {
+                Some("selector") => {
+                    if let Some(ref sel) = kb.selector {
+                        Extraction::Selector { selector: sel.clone() }
+                    } else {
+                        final_extraction.clone()
+                    }
+                }
+                Some("rss") => Extraction::Rss,
+                Some("json_ld") => Extraction::JsonLd { types: None },
+                Some("full") => Extraction::Full,
+                _ => final_extraction.clone(),
+            }
+        };
+        (ki, ke, kx)
+    } else {
+        (final_interval, final_engine, final_extraction)
+    };
 
     // Shell safety: warn if instructions contain $ which may have been mangled by bash
     if let Some(ref instructions) = final_agent_instructions {
@@ -907,6 +1006,8 @@ pub fn cmd_edit(
     new_agent: Option<bool>,
     new_agent_instructions: Option<String>,
     new_selector: Option<String>,
+    new_engine: Option<String>,
+    new_extraction: Option<String>,
     new_notify: Option<String>,
     new_use_profile: Option<bool>,
 ) -> Result<()> {
@@ -918,6 +1019,7 @@ pub fn cmd_edit(
 
     let has_flags = new_name.is_some() || new_interval.is_some() || new_enabled.is_some()
         || new_agent.is_some() || new_agent_instructions.is_some() || new_selector.is_some()
+        || new_engine.is_some() || new_extraction.is_some()
         || new_notify.is_some() || new_use_profile.is_some();
 
     if has_flags {
@@ -976,6 +1078,54 @@ pub fn cmd_edit(
         if let Some(selector) = new_selector {
             watch.extraction = Extraction::Selector { selector: selector.clone() };
             changes.push(format!("selector -> {}", selector));
+        }
+
+        if let Some(ref engine_str) = new_engine {
+            match engine_str.to_lowercase().as_str() {
+                "http" => {
+                    watch.engine = Engine::Http;
+                    changes.push("engine -> http".to_string());
+                }
+                "playwright" | "js" => {
+                    watch.engine = Engine::Playwright;
+                    changes.push("engine -> playwright".to_string());
+                }
+                "rss" => {
+                    watch.engine = Engine::Rss;
+                    changes.push("engine -> rss".to_string());
+                }
+                other => {
+                    return Err(kto::KtoError::ConfigError(format!(
+                        "Unknown engine '{}'. Valid options: http, playwright, rss", other
+                    )));
+                }
+            }
+        }
+
+        if let Some(ref extraction_str) = new_extraction {
+            match extraction_str.to_lowercase().as_str() {
+                "auto" => {
+                    watch.extraction = Extraction::Auto;
+                    changes.push("extraction -> auto".to_string());
+                }
+                "full" => {
+                    watch.extraction = Extraction::Full;
+                    changes.push("extraction -> full".to_string());
+                }
+                "rss" => {
+                    watch.extraction = Extraction::Rss;
+                    changes.push("extraction -> rss".to_string());
+                }
+                "json-ld" | "json_ld" | "jsonld" => {
+                    watch.extraction = Extraction::JsonLd { types: None };
+                    changes.push("extraction -> json-ld".to_string());
+                }
+                other => {
+                    return Err(kto::KtoError::ConfigError(format!(
+                        "Unknown extraction '{}'. Valid options: auto, full, rss, json-ld", other
+                    )));
+                }
+            }
         }
 
         if let Some(notify_str) = new_notify {
@@ -1960,12 +2110,12 @@ fn run_deep_research_flow(
     // Step 1: Dual fetch (HTTP and Playwright)
     let (http_content, js_content) = dual_fetch_with_hint(url, skip_http)?;
 
-    // Step 2: Extract content from both
+    // Step 2: Extract content from both using smart strategy selection
     let http_html = http_content.as_ref().map(|c| c.html.as_str());
     let http_extracted = http_content.as_ref()
-        .and_then(|c| extract::extract(c, &Extraction::Auto).ok());
+        .map(|c| extract::pick_best_extraction(c, detected_intent).1);
     let js_extracted = js_content.as_ref()
-        .and_then(|c| extract::extract(c, &Extraction::Auto).ok());
+        .map(|c| extract::pick_best_extraction(c, detected_intent).1);
 
     // Step 3: Detect site type
     let site_type = http_html.and_then(|html| fetch::detect_site_type(url, html));
@@ -2440,4 +2590,468 @@ fn confirm_research_results(
             Err(kto::KtoError::ConfigError("Watch creation cancelled".into()))
         }
     }
+}
+
+// ============================================================================
+// URL Discovery Mode (Natural Language → URL)
+// ============================================================================
+
+/// Minimum confidence for interactive discovery (user confirms)
+const DISCOVERY_CONFIDENCE_INTERACTIVE: f32 = 0.3;
+/// Minimum confidence for auto-accept in --yes mode
+const DISCOVERY_CONFIDENCE_AUTO: f32 = 0.5;
+
+/// Run the AI-powered URL discovery flow when no URL was provided
+fn run_url_discovery_flow(
+    input: &str,
+    db: &Database,
+    name_override: Option<String>,
+    interval: u64,
+    tags: Vec<String>,
+    use_profile: bool,
+    _use_agent: bool,
+    _agent_instructions: Option<String>,
+    _selector: Option<String>,
+    _research: bool,
+    yes: bool,
+    interactive: bool,
+) -> Result<()> {
+    // Parse intent from input
+    let parsed_intent = ParsedIntent::new(input);
+
+    println!("\n  Discovering URL for: \"{}\"", truncate_str(input, 60));
+    if !parsed_intent.keywords_found.is_empty() {
+        println!("  Detected: {} ({})", parsed_intent.brief_description(),
+                 parsed_intent.keywords_found.join(", ").dimmed());
+    }
+    println!("  Searching...");
+
+    // Call AI discovery
+    let discovery = match agent::discover_url(input, &parsed_intent) {
+        Ok(d) => d,
+        Err(e) => {
+            return Err(kto::KtoError::ConfigError(format!(
+                "URL discovery failed: {}\n  \
+                 Tip: Try providing a URL directly:\n  \
+                 kto new \"https://example.com for price drops\"",
+                e
+            )));
+        }
+    };
+
+    // Validate confidence threshold
+    if discovery.confidence < DISCOVERY_CONFIDENCE_INTERACTIVE {
+        return Err(kto::KtoError::ConfigError(format!(
+            "Could not find a reliable URL for: '{}'\n  \
+             AI confidence: {:.0}%{}\n  \
+             Tip: Try providing a URL directly:\n  \
+             kto new \"https://example.com for price drops\"",
+            truncate_str(input, 50),
+            discovery.confidence * 100.0,
+            if !discovery.reasoning.is_empty() {
+                format!(" ({})", truncate_str(&discovery.reasoning, 80))
+            } else {
+                String::new()
+            }
+        )));
+    }
+
+    // In --yes mode, require higher confidence
+    if yes && discovery.confidence < DISCOVERY_CONFIDENCE_AUTO {
+        return Err(kto::KtoError::ConfigError(format!(
+            "URL discovery confidence too low for --yes mode ({:.0}%, need {:.0}%)\n  \
+             Run interactively to review and confirm the discovered URL.",
+            discovery.confidence * 100.0,
+            DISCOVERY_CONFIDENCE_AUTO * 100.0
+        )));
+    }
+
+    // Display results and get confirmation
+    let action = display_discovery_results(&discovery, yes, interactive)?;
+
+    match action {
+        DiscoveryAction::Accept => {
+            create_watch_from_discovery(
+                db, &discovery, name_override, interval, tags, use_profile, yes, interactive,
+            )
+        }
+        DiscoveryAction::UseAlternative(idx) => {
+            let alt = &discovery.alternatives[idx];
+            // Create a modified discovery with the alternative URL
+            let mut modified = discovery.clone();
+            modified.url = alt.url.clone();
+            if !alt.engine.is_empty() {
+                modified.engine = alt.engine.clone();
+            }
+            create_watch_from_discovery(
+                db, &modified, name_override, interval, tags, use_profile, yes, interactive,
+            )
+        }
+        DiscoveryAction::DeepResearch => {
+            // Redirect to deep research with the discovered URL
+            run_deep_research_flow(
+                input,
+                &discovery.url,
+                name_override,
+                interval,
+                tags,
+                use_profile,
+                yes,
+                interactive,
+            )
+        }
+        DiscoveryAction::ManualUrl => {
+            // Let user type a URL manually
+            let manual_url = Text::new("Enter URL:")
+                .with_help_message("Paste the full URL (e.g., https://example.com/page)")
+                .prompt()
+                .map_err(|e| kto::KtoError::ConfigError(e.to_string()))?;
+
+            if manual_url.trim().is_empty() {
+                return Err(kto::KtoError::ConfigError("No URL provided".into()));
+            }
+
+            // Validate URL
+            let url = if manual_url.starts_with("http://") || manual_url.starts_with("https://") {
+                manual_url.trim().to_string()
+            } else {
+                format!("https://{}", manual_url.trim())
+            };
+
+            if url::Url::parse(&url).is_err() {
+                return Err(kto::KtoError::ConfigError(format!("Invalid URL: {}", url)));
+            }
+
+            println!("  Using URL: {}", url);
+            create_watch_from_discovery(
+                db,
+                &UrlDiscoveryResult {
+                    url,
+                    alternatives: vec![],
+                    engine: "http".into(),
+                    extraction_strategy: "auto".into(),
+                    selector: None,
+                    suggested_name: discovery.suggested_name.clone(),
+                    agent_instructions: discovery.agent_instructions.clone(),
+                    interval_secs: interval,
+                    reasoning: String::new(),
+                    confidence: 1.0,
+                    queries_made: vec![],
+                },
+                name_override,
+                interval,
+                tags,
+                use_profile,
+                yes,
+                interactive,
+            )
+        }
+        DiscoveryAction::Cancel => {
+            Err(kto::KtoError::ConfigError("Watch creation cancelled".into()))
+        }
+    }
+}
+
+/// Actions the user can take after seeing discovery results
+enum DiscoveryAction {
+    Accept,
+    UseAlternative(usize),
+    DeepResearch,
+    ManualUrl,
+    Cancel,
+}
+
+/// Display discovery results and get user confirmation
+fn display_discovery_results(
+    discovery: &UrlDiscoveryResult,
+    yes: bool,
+    interactive: bool,
+) -> Result<DiscoveryAction> {
+    // Extract host for security transparency
+    let host = url::Url::parse(&discovery.url)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_string()))
+        .unwrap_or_else(|| "unknown".to_string());
+
+    // Confidence indicator
+    let confidence_str = if discovery.confidence >= 0.8 {
+        format!("{:.0}%", discovery.confidence * 100.0).green().to_string()
+    } else if discovery.confidence >= 0.5 {
+        format!("{:.0}%", discovery.confidence * 100.0).yellow().to_string()
+    } else {
+        format!("{:.0}%", discovery.confidence * 100.0).red().to_string()
+    };
+
+    println!();
+    println!("  {} Found URL on {}", "->".green(), host.cyan().bold());
+    println!("     {}", discovery.url);
+    println!();
+
+    if !discovery.suggested_name.is_empty() {
+        println!("  Name:       {}", discovery.suggested_name);
+    }
+    if !discovery.agent_instructions.is_empty() {
+        println!("  AI Watch:   \"{}\"", truncate_str(&discovery.agent_instructions, 60));
+    }
+    println!("  Confidence: {}", confidence_str);
+    println!();
+
+    // Auto-accept in --yes mode
+    if yes {
+        println!("  Auto-accepting (--yes mode, confidence {:.0}%)", discovery.confidence * 100.0);
+        return Ok(DiscoveryAction::Accept);
+    }
+
+    if !interactive {
+        return Ok(DiscoveryAction::Accept);
+    }
+
+    // Build choice list
+    let mut choices = vec!["Create Watch"];
+
+    let has_alternatives = !discovery.alternatives.is_empty();
+    if has_alternatives {
+        choices.push("Use Alternative URL");
+    }
+
+    choices.push("Show Details");
+    choices.push("Deep Research");
+    choices.push("Enter URL Manually");
+    choices.push("Cancel");
+
+    loop {
+        let choice = Select::new("What would you like to do?", choices.clone())
+            .prompt()
+            .map_err(|e| kto::KtoError::ConfigError(e.to_string()))?;
+
+        match choice {
+            "Create Watch" => return Ok(DiscoveryAction::Accept),
+            "Use Alternative URL" => {
+                let alt_labels: Vec<String> = discovery.alternatives.iter()
+                    .enumerate()
+                    .map(|(i, alt)| {
+                        let desc = if alt.description.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" - {}", alt.description)
+                        };
+                        format!("{}. {}{}", i + 1, alt.url, desc)
+                    })
+                    .collect();
+
+                let selected = Select::new("Select alternative:", alt_labels)
+                    .prompt()
+                    .map_err(|e| kto::KtoError::ConfigError(e.to_string()))?;
+
+                let idx = selected.split('.').next()
+                    .and_then(|s| s.trim().parse::<usize>().ok())
+                    .map(|n| n - 1)
+                    .unwrap_or(0);
+
+                return Ok(DiscoveryAction::UseAlternative(idx));
+            }
+            "Show Details" => {
+                println!();
+                println!("  {}", "Details".bold().underline());
+                println!("  Engine:     {}", discovery.engine);
+                println!("  Extraction: {}", discovery.extraction_strategy);
+                if let Some(ref sel) = discovery.selector {
+                    println!("  Selector:   {}", sel);
+                }
+                println!("  Interval:   {}", format_interval(discovery.interval_secs));
+                if !discovery.reasoning.is_empty() {
+                    println!("  Reasoning:  {}", discovery.reasoning);
+                }
+                if !discovery.queries_made.is_empty() {
+                    println!("  Searches:   {}", discovery.queries_made.join(", "));
+                }
+                if !discovery.alternatives.is_empty() {
+                    println!("  Alternatives:");
+                    for alt in &discovery.alternatives {
+                        let eng = if alt.engine.is_empty() { "" } else { &alt.engine };
+                        println!("    {} ({}) {}", alt.url, eng, alt.description.dimmed());
+                    }
+                }
+                println!();
+                // Continue loop to show choices again
+            }
+            "Deep Research" => return Ok(DiscoveryAction::DeepResearch),
+            "Enter URL Manually" => return Ok(DiscoveryAction::ManualUrl),
+            "Cancel" | _ => return Ok(DiscoveryAction::Cancel),
+        }
+    }
+}
+
+/// Create a watch from a URL discovery result with preflight validation
+fn create_watch_from_discovery(
+    db: &Database,
+    discovery: &UrlDiscoveryResult,
+    name_override: Option<String>,
+    default_interval: u64,
+    tags: Vec<String>,
+    use_profile: bool,
+    yes: bool,
+    interactive: bool,
+) -> Result<()> {
+    let engine = discovery.to_engine();
+    let extraction = discovery.to_extraction();
+    let url = &discovery.url;
+    let interval = if discovery.interval_secs >= 10 {
+        discovery.interval_secs
+    } else {
+        default_interval
+    };
+
+    // Preflight: fetch and validate the discovered URL
+    println!("\n  Fetching {}...", url);
+    let content = match fetch::fetch(url, engine.clone(), &std::collections::HashMap::new()) {
+        Ok(c) => c,
+        Err(e) => {
+            // Try alternatives
+            let mut last_err = e;
+            let mut found = None;
+            for alt in &discovery.alternatives {
+                let alt_engine = match alt.engine.to_lowercase().as_str() {
+                    "rss" | "atom" => Engine::Rss,
+                    "playwright" | "js" => Engine::Playwright,
+                    _ => Engine::Http,
+                };
+                println!("  Primary URL failed, trying alternative: {}", alt.url);
+                match fetch::fetch(&alt.url, alt_engine, &std::collections::HashMap::new()) {
+                    Ok(c) => {
+                        found = Some((alt.url.clone(), c));
+                        break;
+                    }
+                    Err(e2) => {
+                        last_err = e2;
+                    }
+                }
+            }
+
+            if let Some((_alt_url, c)) = found {
+                c
+            } else {
+                let msg = platform_detect::friendly_error_message(&last_err.to_string(), url);
+                return Err(kto::KtoError::ConfigError(format!(
+                    "Could not fetch discovered URL: {}\n  \
+                     Try providing a URL directly or use --research for thorough analysis.",
+                    msg
+                )));
+            }
+        }
+    };
+
+    // Validate extraction produces meaningful content
+    let extracted = match extract::extract(&content, &extraction) {
+        Ok(e) => e,
+        Err(_) => {
+            // Fall back to auto extraction
+            match extract::extract(&content, &Extraction::Auto) {
+                Ok(e) => e,
+                Err(e) => {
+                    return Err(kto::KtoError::ConfigError(format!(
+                        "Could not extract content from {}: {}",
+                        url, e
+                    )));
+                }
+            }
+        }
+    };
+
+    if extracted.len() < 50 {
+        if !yes {
+            println!("  {} Extracted content is short ({} chars).", "Warning:".yellow(), extracted.len());
+            if interactive {
+                let proceed = Confirm::new("Content looks thin. Proceed anyway?")
+                    .with_default(true)
+                    .prompt()
+                    .unwrap_or(true);
+                if !proceed {
+                    return Err(kto::KtoError::ConfigError("Watch creation cancelled".into()));
+                }
+            }
+        }
+    }
+
+    // Determine name
+    let name = name_override.unwrap_or_else(|| {
+        if !discovery.suggested_name.is_empty() {
+            discovery.suggested_name.clone()
+        } else if let Ok(parsed) = url::Url::parse(url) {
+            generate_name_from_url(&parsed)
+        } else {
+            "Watch".to_string()
+        }
+    });
+
+    // Create watch
+    let mut watch = Watch::new(name.clone(), url.to_string());
+    watch.interval_secs = interval.max(10);
+    watch.engine = engine;
+    watch.extraction = extraction;
+    watch.tags = tags;
+    watch.use_profile = use_profile;
+
+    // Always enable agent for discovery-based watches
+    if !discovery.agent_instructions.is_empty() {
+        watch.agent_config = Some(AgentConfig {
+            enabled: true,
+            prompt_template: None,
+            instructions: Some(discovery.agent_instructions.clone()),
+        });
+    }
+
+    db.insert_watch(&watch)?;
+
+    // Create initial snapshot
+    let normalized = normalize(&extracted, &watch.normalization);
+    let hash = hash_content(&normalized);
+
+    let snapshot = Snapshot {
+        id: Uuid::new_v4(),
+        watch_id: watch.id,
+        fetched_at: Utc::now(),
+        raw_html: Some(zstd::encode_all(content.html.as_bytes(), 3)?),
+        extracted: normalized,
+        content_hash: hash.clone(),
+    };
+    db.insert_snapshot(&snapshot)?;
+
+    // User-friendly success output
+    let has_agent = watch.agent_config.is_some();
+    let agent_instructions = watch.agent_config.as_ref().and_then(|c| c.instructions.as_deref());
+    let intent_description = platform_detect::describe_watch_intent(
+        &watch.engine,
+        has_agent,
+        agent_instructions,
+    );
+
+    let success_msg = platform_detect::format_watch_created(
+        &name,
+        &intent_description,
+        watch.interval_secs,
+        has_agent,
+    );
+    println!("{}", success_msg);
+
+    if !watch.tags.is_empty() {
+        println!("   Tags: {}", watch.tags.join(", "));
+    }
+
+    // Prompt for notification setup if not configured and interactive
+    let mut config = Config::load()?;
+    if config.default_notify.is_none() && interactive && !yes {
+        println!();
+        if let Some(target) = prompt_notification_setup()? {
+            config.default_notify = Some(target);
+            config.save()?;
+            println!("  Notification settings saved.");
+        }
+    }
+
+    if !is_daemon_running() {
+        println!("\n  Run `kto daemon` to start monitoring.");
+    }
+
+    Ok(())
 }

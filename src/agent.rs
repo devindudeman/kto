@@ -1,8 +1,10 @@
 use std::process::Command;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::{KtoError, Result};
+use crate::intent::ParsedIntent;
 use crate::interests::{GlobalMemory, InterestProfile};
 use crate::watch::AgentMemory;
 
@@ -632,6 +634,142 @@ pub fn claude_version() -> Option<String> {
 }
 
 // ============================================================================
+// Knowledge Base Consumption (Learning Loop)
+// ============================================================================
+
+/// Recommendation from the knowledge base for creating a new monitor
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CreationKnowledge {
+    /// Recommended engine (e.g., "http", "rss", "playwright")
+    #[serde(default)]
+    pub engine: Option<String>,
+    /// Recommended extraction strategy (e.g., "auto", "selector", "rss")
+    #[serde(default)]
+    pub extraction: Option<String>,
+    /// Recommended check interval in seconds
+    #[serde(default)]
+    pub interval_secs: Option<u64>,
+    /// Template for agent instructions
+    #[serde(default)]
+    pub instruction_template: Option<String>,
+    /// Recommended CSS selector
+    #[serde(default)]
+    pub selector: Option<String>,
+}
+
+/// Schema-versioned knowledge file
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct KnowledgeFile {
+    schema_version: u64,
+    #[serde(default)]
+    rules: Vec<KnowledgeRule>,
+}
+
+/// A single knowledge rule
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct KnowledgeRule {
+    #[serde(default)]
+    intent_type: String,
+    #[serde(default)]
+    domain_class: Option<String>,
+    #[serde(default)]
+    scope: String,
+    #[serde(default)]
+    confidence: f64,
+    #[serde(default)]
+    applies_to: String,
+    #[serde(default)]
+    recommendation: KnowledgeRecommendation,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct KnowledgeRecommendation {
+    #[serde(default)]
+    engine: Option<String>,
+    #[serde(default)]
+    extraction: Option<String>,
+    #[serde(default)]
+    interval_secs: Option<u64>,
+    #[serde(default)]
+    instruction_template: Option<String>,
+    #[serde(default)]
+    selector: Option<String>,
+}
+
+/// Load creation knowledge from the knowledge base file.
+///
+/// Looks up rules matching the given intent_type and optional domain_hint,
+/// sorted by scope specificity then confidence. Returns None if no knowledge
+/// file exists, the schema is unknown, or no matching rules are found.
+///
+/// Precedence: intent+domain rules > intent-only rules > by confidence.
+pub fn load_creation_knowledge(
+    intent_type: &str,
+    domain_hint: Option<&str>,
+) -> Option<CreationKnowledge> {
+    let path = crate::config::Config::data_dir().ok()?.join("knowledge.json");
+    if !path.exists() {
+        return None;
+    }
+
+    let content = std::fs::read_to_string(&path).ok()?;
+    let kb: KnowledgeFile = serde_json::from_str(&content).ok()?;
+
+    // Safe fallback on unknown schema version
+    if kb.schema_version != 1 {
+        return None;
+    }
+
+    // Filter rules by intent + optional domain, only creation rules
+    let mut matching: Vec<&KnowledgeRule> = kb
+        .rules
+        .iter()
+        .filter(|r| r.intent_type == intent_type && r.applies_to == "creation")
+        .filter(|r| match (&r.domain_class, domain_hint) {
+            (Some(dc), Some(dh)) => dc == dh, // domain match
+            (None, _) => true,                  // intent-only rule applies anywhere
+            (Some(_), None) => false,           // domain rule without hint = skip
+        })
+        .collect();
+
+    if matching.is_empty() {
+        return None;
+    }
+
+    // Sort: domain-scoped first (more specific), then by confidence descending
+    matching.sort_by(|a, b| {
+        let a_has_domain = a.domain_class.is_some() as u8;
+        let b_has_domain = b.domain_class.is_some() as u8;
+        b_has_domain
+            .cmp(&a_has_domain)
+            .then(b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal))
+    });
+
+    // Merge recommendations from matching rules (highest confidence wins per field)
+    let mut result = CreationKnowledge::default();
+    for rule in &matching {
+        let rec = &rule.recommendation;
+        if result.engine.is_none() {
+            result.engine = rec.engine.clone();
+        }
+        if result.extraction.is_none() {
+            result.extraction = rec.extraction.clone();
+        }
+        if result.interval_secs.is_none() {
+            result.interval_secs = rec.interval_secs;
+        }
+        if result.instruction_template.is_none() {
+            result.instruction_template = rec.instruction_template.clone();
+        }
+        if result.selector.is_none() {
+            result.selector = rec.selector.clone();
+        }
+    }
+
+    Some(result)
+}
+
+// ============================================================================
 // Deep Research Mode
 // ============================================================================
 
@@ -1159,6 +1297,291 @@ impl DeepResearchResult {
     }
 }
 
+// ============================================================================
+// URL Discovery Mode
+// ============================================================================
+
+/// A single discovered URL candidate
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscoveredUrl {
+    pub url: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub engine: String,
+}
+
+/// Result of AI-powered URL discovery from a natural language query
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UrlDiscoveryResult {
+    pub url: String,
+    #[serde(default)]
+    pub alternatives: Vec<DiscoveredUrl>,
+    #[serde(default = "default_engine_str")]
+    pub engine: String,
+    #[serde(default = "default_extraction_str")]
+    pub extraction_strategy: String,
+    #[serde(default)]
+    pub selector: Option<String>,
+    #[serde(default)]
+    pub suggested_name: String,
+    #[serde(default)]
+    pub agent_instructions: String,
+    #[serde(default = "default_interval")]
+    pub interval_secs: u64,
+    #[serde(default)]
+    pub reasoning: String,
+    #[serde(default)]
+    pub confidence: f32,
+    #[serde(default)]
+    pub queries_made: Vec<String>,
+}
+
+fn default_engine_str() -> String {
+    "http".to_string()
+}
+
+fn default_extraction_str() -> String {
+    "auto".to_string()
+}
+
+impl UrlDiscoveryResult {
+    /// Convert engine string to Engine enum
+    pub fn to_engine(&self) -> Engine {
+        match self.engine.to_lowercase().as_str() {
+            "rss" | "atom" | "feed" => Engine::Rss,
+            "playwright" | "js" | "javascript" => Engine::Playwright,
+            _ => Engine::Http,
+        }
+    }
+
+    /// Convert extraction_strategy string to Extraction enum
+    pub fn to_extraction(&self) -> crate::watch::Extraction {
+        use crate::watch::Extraction;
+        match self.extraction_strategy.to_lowercase().as_str() {
+            "selector" => {
+                if let Some(ref sel) = self.selector {
+                    Extraction::Selector { selector: sel.clone() }
+                } else {
+                    Extraction::Auto
+                }
+            }
+            "rss" => Extraction::Rss,
+            "json_ld" | "json-ld" | "jsonld" => Extraction::JsonLd { types: None },
+            "full" => Extraction::Full,
+            _ => Extraction::Auto,
+        }
+    }
+}
+
+const URL_DISCOVERY_PROMPT: &str = r#"You are helping a user set up a web page monitor. They described what they want to monitor in natural language WITHOUT providing a URL. Your job is to find the best public URL to monitor.
+
+## User's Request
+"{{user_request}}"
+
+## Parsed Intent (best-effort, may be incomplete)
+Goal: {{goal}}
+Threshold: {{threshold}}
+Target Item: {{target_item}}
+Keywords: {{keywords}}
+
+## Instructions
+
+1. **Research** the best public URL for the user's intent using WebSearch
+2. **Evaluate** candidates based on:
+   - Publicly accessible (no login required)
+   - Contains the target data (prices, stock, releases, etc.)
+   - Reliability and update frequency
+   - RSS/Atom feeds preferred over HTML scraping
+   - API endpoints preferred over rendered pages
+3. **Select** the best URL, prioritizing: RSS > API > static HTML > JS-rendered
+4. Return structured JSON
+
+## Rules
+- URL MUST be publicly accessible (no login/auth required)
+- Prefer RSS/Atom feeds when available (more reliable, less resource-intensive)
+- Prefer authoritative sources (official sites, major aggregators)
+- For cryptocurrency/stocks: use aggregators like CoinGecko, Yahoo Finance, etc.
+- For software releases: prefer GitHub releases.atom or official RSS feeds
+- For product prices: prefer the product page on the retailer's site
+- If NOTHING suitable found, set confidence to 0.0 and explain in reasoning
+
+## Output Format (JSON only, no other text)
+{
+  "url": "https://best-url-to-monitor",
+  "alternatives": [
+    {"url": "https://alternative-1", "description": "Why this is an option", "engine": "http"}
+  ],
+  "engine": "http|playwright|rss",
+  "extraction_strategy": "auto|selector|rss|json_ld",
+  "selector": "CSS selector if extraction_strategy is selector, or null",
+  "suggested_name": "Short name for this watch (2-4 words)",
+  "agent_instructions": "Specific instructions for AI analysis of changes",
+  "interval_secs": 900,
+  "reasoning": "Why this URL and strategy were chosen",
+  "confidence": 0.85,
+  "queries_made": ["search query 1", "search query 2"]
+}"#;
+
+/// Discover the best URL to monitor based on a natural language user request.
+/// Uses Claude CLI with WebSearch to research and find suitable URLs.
+pub fn discover_url(user_request: &str, parsed_intent: &ParsedIntent) -> Result<UrlDiscoveryResult> {
+    // Ensure workspace directory exists
+    std::fs::create_dir_all("/tmp/kto-workspace")?;
+
+    let threshold_str = parsed_intent.threshold
+        .as_ref()
+        .map(|t| t.to_string())
+        .unwrap_or_else(|| "none".to_string());
+
+    let target_str = parsed_intent.target_item
+        .as_deref()
+        .unwrap_or("none");
+
+    let keywords_str = if parsed_intent.keywords_found.is_empty() {
+        "none".to_string()
+    } else {
+        parsed_intent.keywords_found.join(", ")
+    };
+
+    let prompt = URL_DISCOVERY_PROMPT
+        .replace("{{user_request}}", user_request)
+        .replace("{{goal}}", &format!("{:?}", parsed_intent.goal))
+        .replace("{{threshold}}", &threshold_str)
+        .replace("{{target_item}}", target_str)
+        .replace("{{keywords}}", &keywords_str);
+
+    let system_prompt = "You are a web monitoring expert. Find the best public URL for the user's monitoring needs using web search. Respond only with valid JSON matching the schema provided.";
+
+    // Try with web search first
+    let result = discover_url_with_search(&prompt, system_prompt);
+    match result {
+        Ok(r) => return Ok(r),
+        Err(_) => {
+            // Fall back to without web search
+            return discover_url_without_search(&prompt, system_prompt);
+        }
+    }
+}
+
+/// Try URL discovery with WebSearch enabled
+fn discover_url_with_search(prompt: &str, system_prompt: &str) -> Result<UrlDiscoveryResult> {
+    let mut child = Command::new("claude")
+        .current_dir("/tmp/kto-workspace")
+        .args([
+            "--allowedTools", "WebSearch,WebFetch",
+            "-p",
+            "--output-format", "json",
+            "--max-turns", "5",
+            "--system-prompt", system_prompt,
+            prompt,
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+
+    // 60-second timeout
+    let timeout = Duration::from_secs(60);
+    let start = std::time::Instant::now();
+
+    loop {
+        match child.try_wait()? {
+            Some(status) => {
+                let output = child.wait_with_output()?;
+                if !status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    return Err(KtoError::ClaudeFailed(format!(
+                        "URL discovery with search failed: {}", stderr
+                    )));
+                }
+                return parse_discovery_response(&output.stdout);
+            }
+            None => {
+                if start.elapsed() > timeout {
+                    let _ = child.kill();
+                    return Err(KtoError::ClaudeFailed(
+                        "URL discovery timed out after 60 seconds".into()
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        }
+    }
+}
+
+/// Try URL discovery without web search (fallback)
+fn discover_url_without_search(prompt: &str, system_prompt: &str) -> Result<UrlDiscoveryResult> {
+    let mut child = Command::new("claude")
+        .current_dir("/tmp/kto-workspace")
+        .args([
+            "-p",
+            "--output-format", "json",
+            "--max-turns", "3",
+            "--system-prompt", system_prompt,
+            prompt,
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+
+    // 60-second timeout
+    let timeout = Duration::from_secs(60);
+    let start = std::time::Instant::now();
+
+    loop {
+        match child.try_wait()? {
+            Some(status) => {
+                let output = child.wait_with_output()?;
+                if !status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    return Err(KtoError::ClaudeFailed(format!(
+                        "URL discovery failed: {}", stderr
+                    )));
+                }
+                return parse_discovery_response(&output.stdout);
+            }
+            None => {
+                if start.elapsed() > timeout {
+                    let _ = child.kill();
+                    return Err(KtoError::ClaudeFailed(
+                        "URL discovery timed out after 60 seconds".into()
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        }
+    }
+}
+
+/// Parse URL discovery response from Claude
+fn parse_discovery_response(stdout: &[u8]) -> Result<UrlDiscoveryResult> {
+    let stdout_str = String::from_utf8_lossy(stdout);
+
+    if stdout_str.trim().is_empty() {
+        return Err(KtoError::ClaudeFailed("Claude returned empty response for URL discovery".into()));
+    }
+
+    let claude_response: serde_json::Value = serde_json::from_str(&stdout_str)
+        .map_err(|e| KtoError::ClaudeFailed(format!(
+            "Failed to parse Claude output: {}. First 500 chars: {}",
+            e, &stdout_str.chars().take(500).collect::<String>()
+        )))?;
+
+    let result_text = claude_response["result"]
+        .as_str()
+        .ok_or_else(|| KtoError::ClaudeFailed("No result in discovery response".into()))?;
+
+    let json_text = strip_code_fencing(result_text);
+
+    let result: UrlDiscoveryResult = serde_json::from_str(&json_text)
+        .map_err(|e| KtoError::ClaudeFailed(format!(
+            "Failed to parse discovery response: {}. First 500 chars: {}",
+            e, &json_text.chars().take(500).collect::<String>()
+        )))?;
+
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1280,5 +1703,116 @@ mod tests {
         // With preamble text and content after code block
         let input = "Based on my analysis:\n```json\n{\"foo\": \"bar\"}\n```\nHope this helps!";
         assert_eq!(strip_code_fencing(input), "{\"foo\": \"bar\"}");
+    }
+
+    #[test]
+    fn test_parse_url_discovery_result_full() {
+        let json = r#"{
+            "url": "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd",
+            "alternatives": [
+                {"url": "https://coinmarketcap.com/currencies/bitcoin/", "description": "CoinMarketCap page", "engine": "playwright"}
+            ],
+            "engine": "http",
+            "extraction_strategy": "json_ld",
+            "selector": null,
+            "suggested_name": "Bitcoin Price",
+            "agent_instructions": "Alert when price goes above $100,000",
+            "interval_secs": 300,
+            "reasoning": "CoinGecko API is free and reliable",
+            "confidence": 0.92,
+            "queries_made": ["bitcoin price api", "coingecko api"]
+        }"#;
+
+        let result: UrlDiscoveryResult = serde_json::from_str(json).unwrap();
+        assert_eq!(result.url, "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd");
+        assert_eq!(result.alternatives.len(), 1);
+        assert_eq!(result.engine, "http");
+        assert_eq!(result.suggested_name, "Bitcoin Price");
+        assert_eq!(result.interval_secs, 300);
+        assert!((result.confidence - 0.92).abs() < 0.01);
+        assert_eq!(result.queries_made.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_url_discovery_result_minimal() {
+        // Only url is required, everything else has serde(default)
+        let json = r#"{"url": "https://example.com"}"#;
+
+        let result: UrlDiscoveryResult = serde_json::from_str(json).unwrap();
+        assert_eq!(result.url, "https://example.com");
+        assert!(result.alternatives.is_empty());
+        assert_eq!(result.engine, "http");
+        assert_eq!(result.extraction_strategy, "auto");
+        assert!(result.selector.is_none());
+        assert!(result.suggested_name.is_empty());
+        assert!(result.agent_instructions.is_empty());
+        assert_eq!(result.interval_secs, 900);
+        assert!((result.confidence - 0.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_parse_url_discovery_result_extra_fields() {
+        // Extra fields should be ignored gracefully
+        let json = r#"{
+            "url": "https://example.com",
+            "unknown_field": "should be ignored",
+            "another_extra": 42
+        }"#;
+
+        let result: UrlDiscoveryResult = serde_json::from_str(json).unwrap();
+        assert_eq!(result.url, "https://example.com");
+    }
+
+    #[test]
+    fn test_url_discovery_to_engine() {
+        let make = |engine: &str| UrlDiscoveryResult {
+            url: "https://example.com".into(),
+            alternatives: vec![],
+            engine: engine.into(),
+            extraction_strategy: "auto".into(),
+            selector: None,
+            suggested_name: String::new(),
+            agent_instructions: String::new(),
+            interval_secs: 900,
+            reasoning: String::new(),
+            confidence: 0.5,
+            queries_made: vec![],
+        };
+
+        assert!(matches!(make("http").to_engine(), Engine::Http));
+        assert!(matches!(make("rss").to_engine(), Engine::Rss));
+        assert!(matches!(make("atom").to_engine(), Engine::Rss));
+        assert!(matches!(make("feed").to_engine(), Engine::Rss));
+        assert!(matches!(make("playwright").to_engine(), Engine::Playwright));
+        assert!(matches!(make("js").to_engine(), Engine::Playwright));
+        assert!(matches!(make("javascript").to_engine(), Engine::Playwright));
+        assert!(matches!(make("unknown").to_engine(), Engine::Http));
+    }
+
+    #[test]
+    fn test_url_discovery_to_extraction() {
+        use crate::watch::Extraction;
+
+        let make = |strategy: &str, selector: Option<&str>| UrlDiscoveryResult {
+            url: "https://example.com".into(),
+            alternatives: vec![],
+            engine: "http".into(),
+            extraction_strategy: strategy.into(),
+            selector: selector.map(|s| s.to_string()),
+            suggested_name: String::new(),
+            agent_instructions: String::new(),
+            interval_secs: 900,
+            reasoning: String::new(),
+            confidence: 0.5,
+            queries_made: vec![],
+        };
+
+        assert!(matches!(make("auto", None).to_extraction(), Extraction::Auto));
+        assert!(matches!(make("rss", None).to_extraction(), Extraction::Rss));
+        assert!(matches!(make("json_ld", None).to_extraction(), Extraction::JsonLd { .. }));
+        assert!(matches!(make("full", None).to_extraction(), Extraction::Full));
+        assert!(matches!(make("selector", Some(".price")).to_extraction(), Extraction::Selector { .. }));
+        // selector strategy without a selector falls back to auto
+        assert!(matches!(make("selector", None).to_extraction(), Extraction::Auto));
     }
 }

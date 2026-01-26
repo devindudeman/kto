@@ -259,7 +259,7 @@ fn assess_quality(content: &str, extraction: &Extraction, intent: Intent) -> Dat
 }
 
 /// Check if content matches expected type for intent
-fn check_expected_type(content: &str, intent: Intent) -> bool {
+pub fn check_expected_type(content: &str, intent: Intent) -> bool {
     let lower = content.to_lowercase();
 
     match intent {
@@ -308,7 +308,7 @@ fn check_expected_type(content: &str, intent: Intent) -> bool {
 }
 
 /// Check if content looks like a price
-fn has_price_pattern(content: &str) -> bool {
+pub fn has_price_pattern(content: &str) -> bool {
     // Check for currency symbols followed by numbers
     let patterns = [
         r"\$\d", r"€\d", r"£\d", r"¥\d",
@@ -330,7 +330,7 @@ fn has_price_pattern(content: &str) -> bool {
 }
 
 /// Check if content appears to be template/placeholder
-fn is_template_content(content: &str) -> bool {
+pub fn is_template_content(content: &str) -> bool {
     let lower = content.to_lowercase();
 
     // Check for common template patterns
@@ -380,7 +380,7 @@ fn is_template_content(content: &str) -> bool {
 }
 
 /// Get stability hint for an extraction method
-fn stability_for_extraction(extraction: &Extraction) -> f32 {
+pub fn stability_for_extraction(extraction: &Extraction) -> f32 {
     match extraction {
         Extraction::Rss => 0.95, // RSS is very stable
         Extraction::JsonLd { .. } => 0.9, // JSON-LD is stable

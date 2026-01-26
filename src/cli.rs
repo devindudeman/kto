@@ -13,10 +13,12 @@ pub enum CompletionShell {
 #[command(name = "kto")]
 #[command(author, version, about = "A generic, flexible web change watcher", long_about = None)]
 #[command(after_help = r#"Examples:
-  kto new "https://example.com for price drops"   Create a new watch
-  kto list                                        List all watches
-  kto test "My Watch"                             Test a watch manually
-  kto service install                             Run kto in background
+  kto new "https://example.com for price drops"            Create a watch with URL
+  kto new "let me know when bitcoin goes above 100k"       AI discovers URL
+  kto new "alert me when RTX 5090 is back in stock"        AI finds product page
+  kto list                                                 List all watches
+  kto test "My Watch"                                      Test a watch manually
+  kto service install                                      Run kto in background
 
 Quick Start:
   1. kto new "https://example.com" --name "Example"
@@ -33,17 +35,18 @@ pub enum Commands {
     /// Create a new watch (interactive wizard)
     #[command(after_help = r#"Examples:
   kto new "https://amazon.com/dp/... for price drops"
+  kto new "let me know when bitcoin goes above 100k"    # AI discovers URL
+  kto new "alert me when RTX 5090 is back in stock"     # AI finds product page
+  kto new "notify me about new Rust releases"            # AI finds RSS feed
   kto new "https://news.ycombinator.com" --name "HN" --interval 5m
   kto new "https://spa-site.com" --js          # Enable JavaScript rendering
   kto new "https://rss.nytimes.com/..." --rss  # Monitor RSS/Atom feed
   kto new "docker ps" --shell --name "containers"  # Monitor command output
-  kto new "df -h" --shell --tag system --tag disk  # Shell with tags
   kto new --clipboard                          # Read URL from clipboard
   kto new "https://example.com" --name test --yes  # Non-interactive mode
-  kto new "https://news.ycombinator.com" --agent --use-profile  # Use interest profile
 "#)]
     New {
-        /// Natural language description of what to watch (include URL)
+        /// Natural language description (URL optional - AI can discover it)
         #[arg(value_name = "DESCRIPTION")]
         description: Option<String>,
 
@@ -141,6 +144,8 @@ pub enum Commands {
   kto edit "My Watch" --agent true           Enable AI agent
   kto edit "My Watch" --agent-instructions "Alert on price drops below $50"
   kto edit "My Watch" --selector ".price"    Change CSS selector
+  kto edit "My Watch" --engine playwright    Switch to JavaScript rendering
+  kto edit "My Watch" --extraction full      Use full page content extraction
   kto edit "My Watch" --notify ntfy:alerts   Set per-watch notification
   kto edit "My Watch" --notify none          Remove per-watch notification
   kto edit "My Watch" --use-profile true     Enable interest profile for AI
@@ -173,6 +178,14 @@ pub enum Commands {
         /// Change CSS selector for extraction
         #[arg(long)]
         selector: Option<String>,
+
+        /// Fetch engine (http, playwright, rss)
+        #[arg(long)]
+        engine: Option<String>,
+
+        /// Extraction strategy (auto, full, rss, json-ld)
+        #[arg(long)]
+        extraction: Option<String>,
 
         /// Per-watch notification target (e.g., "ntfy:topic", "slack:webhook", "discord:webhook", "gotify:server:token", "command:cmd", "none" to clear)
         #[arg(long)]

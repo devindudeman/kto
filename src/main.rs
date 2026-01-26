@@ -51,11 +51,13 @@ fn run() -> Result<()> {
             agent,
             agent_instructions,
             selector,
+            engine,
+            extraction,
             notify,
             use_profile,
         } => commands::cmd_edit(
             &watch, name, interval, enabled, agent,
-            agent_instructions, selector, notify, use_profile,
+            agent_instructions, selector, engine, extraction, notify, use_profile,
         ),
 
         Commands::Pause { watch } => commands::cmd_pause(&watch),
