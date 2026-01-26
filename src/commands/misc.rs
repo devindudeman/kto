@@ -3,6 +3,7 @@
 use clap::CommandFactory;
 use clap_complete::{generate, Shell};
 use colored::Colorize;
+use serde_json;
 use std::io;
 use std::time::Duration;
 
@@ -236,18 +237,149 @@ pub fn cmd_memory(id_or_name: &str, json: bool, clear: bool) -> Result<()> {
     Ok(())
 }
 
+/// Skip reason for structured logging
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum SkipReason {
+    /// Filter rules didn't match
+    Filter,
+    /// AI decided not to notify
+    AiSkip,
+    /// Within quiet hours
+    QuietHours,
+    /// No skip - was notified
+    None,
+}
+
+impl SkipReason {
+    fn code(&self) -> &'static str {
+        match self {
+            SkipReason::Filter => "filter",
+            SkipReason::AiSkip => "ai_skip",
+            SkipReason::QuietHours => "quiet",
+            SkipReason::None => "notified",
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            SkipReason::Filter => "⊘ filtered",
+            SkipReason::AiSkip => "○ AI skip",
+            SkipReason::QuietHours => "◑ quiet",
+            SkipReason::None => "✓ sent",
+        }
+    }
+}
+
+/// Determine skip reason from change data
+fn get_skip_reason(change: &Change) -> SkipReason {
+    if change.notified {
+        return SkipReason::None;
+    }
+    if !change.filter_passed {
+        return SkipReason::Filter;
+    }
+    // Check if AI said not to notify
+    if let Some(ref resp) = change.agent_response {
+        if let Some(notify) = resp.get("notify").and_then(|v| v.as_bool()) {
+            if !notify {
+                return SkipReason::AiSkip;
+            }
+        }
+    }
+    // Default to quiet hours if notified=false but filter passed and AI didn't skip
+    SkipReason::QuietHours
+}
+
+/// Truncate string at word boundary, preserving UTF-8
+fn truncate_at_word(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        return s.to_string();
+    }
+
+    // Find the last space before max_len
+    let truncated: String = s.chars().take(max_len).collect();
+    if let Some(last_space) = truncated.rfind(' ') {
+        if last_space > max_len / 2 {
+            return format!("{}…", &truncated[..last_space]);
+        }
+    }
+    format!("{}…", truncated)
+}
+
+/// Clean diff markers: convert [-old][+new] to "-old +new" format
+fn clean_diff_preview(diff: &str, max_len: usize) -> String {
+    let mut result = String::new();
+    let mut chars = diff.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '[' {
+            // Check for [-...] or [+...]
+            if let Some(&marker) = chars.peek() {
+                if marker == '-' || marker == '+' {
+                    chars.next(); // consume marker
+                    result.push(marker);
+                    // Collect until ]
+                    while let Some(inner) = chars.next() {
+                        if inner == ']' {
+                            result.push(' ');
+                            break;
+                        }
+                        result.push(inner);
+                    }
+                    continue;
+                }
+            }
+        }
+        if c == '\n' {
+            result.push(' ');
+        } else {
+            result.push(c);
+        }
+    }
+
+    // Clean up multiple spaces
+    let cleaned: String = result.split_whitespace().collect::<Vec<_>>().join(" ");
+    truncate_at_word(&cleaned, max_len)
+}
+
+/// Get a human-readable summary from the change
+fn get_change_summary(change: &Change) -> String {
+    // Priority 1: AI title
+    if let Some(ref resp) = change.agent_response {
+        if let Some(title) = resp.get("title").and_then(|v| v.as_str()) {
+            if !title.is_empty() {
+                return truncate_at_word(title, 50);
+            }
+        }
+        // Priority 2: AI summary
+        if let Some(summary) = resp.get("summary").and_then(|v| v.as_str()) {
+            if !summary.is_empty() {
+                return truncate_at_word(summary, 50);
+            }
+        }
+    }
+    // Priority 3: Cleaned diff preview
+    clean_diff_preview(&change.diff, 50)
+}
+
 /// Tail activity log
-pub fn cmd_logs(lines: usize, follow: bool) -> Result<()> {
+pub fn cmd_logs(lines: usize, follow: bool, json: bool) -> Result<()> {
     let db = Database::open()?;
 
     // Initial display
     let changes = db.get_all_recent_changes(lines)?;
 
     if changes.is_empty() {
-        println!("No changes recorded yet.");
+        if json {
+            println!("[]");
+        } else {
+            println!("No changes recorded yet.");
+        }
         if !follow {
             return Ok(());
         }
+    } else if json {
+        print_changes_json(&changes);
     } else {
         println!("\nRecent changes:\n");
         for (change, watch_name) in &changes {
@@ -256,7 +388,9 @@ pub fn cmd_logs(lines: usize, follow: bool) -> Result<()> {
     }
 
     if follow {
-        println!("\nWatching for new changes... (Ctrl+C to stop)\n");
+        if !json {
+            println!("\nWatching for new changes... (Ctrl+C to stop)\n");
+        }
 
         let mut last_seen = changes.first().map(|(c, _)| c.detected_at);
 
@@ -271,7 +405,11 @@ pub fn cmd_logs(lines: usize, follow: bool) -> Result<()> {
                         continue;
                     }
                 }
-                print_change_log(&change, &watch_name);
+                if json {
+                    print_change_json(&change, &watch_name);
+                } else {
+                    print_change_log(&change, &watch_name);
+                }
                 last_seen = Some(change.detected_at);
             }
         }
@@ -280,20 +418,70 @@ pub fn cmd_logs(lines: usize, follow: bool) -> Result<()> {
     Ok(())
 }
 
+fn print_changes_json(changes: &[(Change, String)]) {
+    let entries: Vec<serde_json::Value> = changes.iter().map(|(change, watch_name)| {
+        change_to_json(change, watch_name)
+    }).collect();
+
+    if let Ok(json) = serde_json::to_string_pretty(&entries) {
+        println!("{}", json);
+    }
+}
+
+fn print_change_json(change: &Change, watch_name: &str) {
+    if let Ok(json) = serde_json::to_string(&change_to_json(change, watch_name)) {
+        println!("{}", json);
+    }
+}
+
+fn change_to_json(change: &Change, watch_name: &str) -> serde_json::Value {
+    let skip_reason = get_skip_reason(change);
+
+    let mut entry = serde_json::json!({
+        "timestamp": change.detected_at.to_rfc3339(),
+        "watch": watch_name,
+        "status": skip_reason.code(),
+        "notified": change.notified,
+        "filter_passed": change.filter_passed,
+        "diff_size": change.diff.len(),
+    });
+
+    // Add AI response fields if present
+    if let Some(ref resp) = change.agent_response {
+        if let Some(title) = resp.get("title").and_then(|v| v.as_str()) {
+            entry["ai_title"] = serde_json::Value::String(title.to_string());
+        }
+        if let Some(summary) = resp.get("summary").and_then(|v| v.as_str()) {
+            entry["ai_summary"] = serde_json::Value::String(summary.to_string());
+        }
+        if let Some(notify) = resp.get("notify").and_then(|v| v.as_bool()) {
+            entry["ai_notify"] = serde_json::Value::Bool(notify);
+        }
+    }
+
+    entry
+}
+
 fn print_change_log(change: &Change, watch_name: &str) {
     let time = change.detected_at.format("%Y-%m-%d %H:%M:%S");
-    let status = if change.notified { "notified" } else { "silent" };
-    let filter = if change.filter_passed { "pass" } else { "skip" };
+    let skip_reason = get_skip_reason(change);
 
-    // Truncate diff for display
-    let diff_preview: String = change.diff
-        .chars()
-        .take(60)
-        .collect::<String>()
-        .replace('\n', " ");
+    // Truncate watch name to keep alignment
+    let watch_display = truncate_at_word(watch_name, 20);
 
-    println!("  {} | {} | {} | {} | {}...",
-             time, watch_name, filter, status, diff_preview.trim());
+    // Get the best available summary
+    let summary = get_change_summary(change);
+
+    // Use colored output for status
+    let status_display = match skip_reason {
+        SkipReason::None => skip_reason.label().green(),
+        SkipReason::Filter => skip_reason.label().yellow(),
+        SkipReason::AiSkip => skip_reason.label().blue(),
+        SkipReason::QuietHours => skip_reason.label().cyan(),
+    };
+
+    println!("  {} │ {:20} │ {:12} │ {}",
+             time, watch_display, status_display, summary);
 }
 
 /// Check all dependencies and suggest fixes

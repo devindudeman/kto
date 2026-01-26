@@ -312,6 +312,10 @@ pub enum Commands {
         /// Follow log output
         #[arg(short, long)]
         follow: bool,
+
+        /// Output as JSON (machine-readable)
+        #[arg(long)]
+        json: bool,
     },
 
     /// Check all dependencies and suggest fixes
